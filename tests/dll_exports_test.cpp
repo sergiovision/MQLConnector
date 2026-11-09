@@ -1,5 +1,6 @@
 // Windows only: loads the built DLL the way MT5 does (LoadLibraryW + GetProcAddress) and calls
 // every export against the loopback server.
+#include "mqlconnector/version.h"
 #include "test_support.h"
 
 #include <gtest/gtest.h>
@@ -30,6 +31,7 @@ using DoPostMessageFn = void(__stdcall*)(const wchar_t*);
 using DoListenMessageFn = const wchar_t*(__stdcall*)(int64_t);
 using GetLevelsFn = const wchar_t*(__stdcall*)(const wchar_t*, int64_t);
 using GetSignalCacheFn = const wchar_t*(__stdcall*)(const wchar_t*, const wchar_t*, int64_t);
+using GetVersionFn = const wchar_t*(__stdcall*)();
 
 std::wstring widen(std::string_view ascii) { return std::wstring(ascii.begin(), ascii.end()); }
 
@@ -56,9 +58,12 @@ TEST(DllExports, EveryExportWorksThroughGetProcAddress) {
     const auto listen = find<DoListenMessageFn>(dll, "DoListenMessage");
     const auto levels = find<GetLevelsFn>(dll, "GetLevels");
     const auto cache = find<GetSignalCacheFn>(dll, "GetSignalCache");
-    ASSERT_TRUE(init && destroy && send && post && listen && levels && cache);
+    const auto version = find<GetVersionFn>(dll, "GetVersion");
+    ASSERT_TRUE(init && destroy && send && post && listen && levels && cache && version);
 
-    // Before InitLib.
+    // Before InitLib: GetVersion needs no session.
+    EXPECT_STREQ(version(), MQLC_VERSION_W);
+    EXPECT_STREQ(version(), L"1.1.0");
     EXPECT_STREQ(levels(L"EURUSD", 1), L"Failed to initialize MQLConnector.dll");
     EXPECT_STREQ(send(nullptr), L"");
     EXPECT_STREQ(listen(1), L"");
@@ -85,6 +90,15 @@ TEST(DllExports, EveryExportWorksThroughGetProcAddress) {
     destroy(22);
     destroy(21);
     EXPECT_STREQ(levels(L"EURUSD", 21), L"Failed to initialize MQLConnector.dll");
+
+    // A new connection lifetime with the generic profile: no FinCore extras.
+    ASSERT_EQ(init(widen(R"({"ChartId":23,"Profile":"generic","Port":)" + std::to_string(port) + "}").c_str()), 1);
+    EXPECT_STREQ(levels(L"EURUSD", 23), L"");
+    EXPECT_STREQ(cache(L"key", L"EURUSD", 23), L"");
+    const std::wstring generic_reply = send(L"{\"Id\":1001,\"ChartId\":23,\"Data\":\"g\"}");
+    EXPECT_NE(generic_reply.find(L"\"ChartId\":23"), std::wstring::npos);
+    EXPECT_STREQ(version(), MQLC_VERSION_W);
+    destroy(23);
 
     // InitLib pinned the module: FreeLibrary must not unmap it while threads may still run.
     FreeLibrary(dll);

@@ -78,5 +78,29 @@ TEST(Logger, RollsOwnFileBySize) {
     EXPECT_LE(std::filesystem::file_size(path), 200u);
 }
 
+TEST(Logger, LevelFilters) {
+    const auto path = temp_file("mqlc_logger_level.log");
+    {
+        Logger logger;
+        logger.open(path, false);
+        logger.set_level(LogLevel::error);
+        EXPECT_TRUE(logger.enabled(LogLevel::error));
+        EXPECT_FALSE(logger.enabled(LogLevel::info));
+        logger.log("info hidden");
+        logger.log(LogLevel::error, "error shown");
+        logger.set_level(LogLevel::off);
+        EXPECT_FALSE(logger.enabled(LogLevel::error));
+        logger.log(LogLevel::error, "nothing at off");
+        logger.set_level(LogLevel::info);
+        logger.log("info shown");
+        logger.flush();
+    }
+    const std::string text = read_all(path);
+    EXPECT_EQ(text.find("hidden"), std::string::npos);
+    EXPECT_EQ(text.find("nothing at off"), std::string::npos);
+    EXPECT_NE(text.find("error shown"), std::string::npos);
+    EXPECT_NE(text.find("info shown"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace mqlc::core

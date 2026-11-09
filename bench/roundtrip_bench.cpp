@@ -2,6 +2,9 @@
 // does, minus the UTF-16 conversion at the ABI).
 //
 //   mqlc_bench [--n 10000] [--warmup 200] [--payload 64] [--port P]
+//              [--framing delimiter|length] [--delimiter 26] [--corr 0|1]
+//
+// --corr 1 turns correlation on (CorrelationKey "ReqId"; every request carries one).
 //
 // Without --port an in-process loopback echo server is started; with --port it talks to an
 // external one (tools/echo_server, or FinCore itself on 2022 - every request then reaches the
@@ -26,6 +29,9 @@ struct Options {
     long warmup = 200;
     long payload = 64;
     unsigned long port = 0;
+    std::string_view framing = "delimiter";
+    long delimiter = 26;
+    long corr = 0;
 };
 
 bool parse(int argc, char** argv, Options& o) {
@@ -36,9 +42,14 @@ bool parse(int argc, char** argv, Options& o) {
         else if (key == "--warmup") o.warmup = std::strtol(value, nullptr, 10);
         else if (key == "--payload") o.payload = std::strtol(value, nullptr, 10);
         else if (key == "--port") o.port = std::strtoul(value, nullptr, 10);
+        else if (key == "--framing") o.framing = value;
+        else if (key == "--delimiter") o.delimiter = std::strtol(value, nullptr, 10);
+        else if (key == "--corr") o.corr = std::strtol(value, nullptr, 10);
         else return false;
     }
-    return argc % 2 == 1 && o.n > 0 && o.warmup >= 0 && o.payload >= 0 && o.port <= 65535;
+    return argc % 2 == 1 && o.n > 0 && o.warmup >= 0 && o.payload >= 0 && o.port <= 65535 &&
+           (o.framing == "delimiter" || o.framing == "length") && o.delimiter >= 1 && o.delimiter <= 31 &&
+           (o.corr == 0 || o.corr == 1);
 }
 
 double percentile(const std::vector<double>& sorted, double p) {
@@ -51,14 +62,19 @@ double percentile(const std::vector<double>& sorted, double p) {
 int main(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, o)) {
-        std::fprintf(stderr, "usage: mqlc_bench [--n N] [--warmup N] [--payload BYTES] [--port P]\n");
+        std::fprintf(stderr,
+                     "usage: mqlc_bench [--n N] [--warmup N] [--payload BYTES] [--port P]\n"
+                     "                  [--framing delimiter|length] [--delimiter 1..31] [--corr 0|1]\n");
         return 2;
     }
 
     std::unique_ptr<mqlc::tools::LoopbackServer> server;
     std::uint16_t port = static_cast<std::uint16_t>(o.port);
+    mqlc::core::FramingOptions framing;
+    framing.kind = o.framing == "length" ? mqlc::core::FramingKind::length : mqlc::core::FramingKind::delimiter;
+    framing.delimiter = static_cast<char>(o.delimiter);
     if (port == 0) {
-        server = std::make_unique<mqlc::tools::LoopbackServer>();
+        server = std::make_unique<mqlc::tools::LoopbackServer>(std::uint16_t{0}, mqlc::tools::LoopbackServer::echo, framing);
         if (!server->listening()) {
             std::fprintf(stderr, "cannot start loopback server: %s\n", server->error().c_str());
             return 1;
@@ -73,16 +89,19 @@ int main(int argc, char** argv) {
                                  .add_int("Port", port)
                                  .add_int("ChartId", kChart)
                                  .add_int("WaitTimeout", 3000)
+                                 .add_string("Framing", o.framing)
+                                 .add_int("Delimiter", o.delimiter)
+                                 .add_string("CorrelationKey", o.corr != 0 ? "ReqId" : "")
                                  .finish();
     if (session.init(init) != 1) {
         std::fprintf(stderr, "cannot connect to 127.0.0.1:%u\n", unsigned{port});
         return 1;
     }
 
-    const std::string request = mqlc::core::json::ObjectWriter()
-                                    .add_int("Id", 1001)
-                                    .add_int("ChartId", kChart)
-                                    .add_string("Sym", "BENCH")
+    mqlc::core::json::ObjectWriter writer;
+    writer.add_int("Id", 1001).add_int("ChartId", kChart);
+    if (o.corr != 0) writer.add_int("ReqId", 1);
+    const std::string request = writer.add_string("Sym", "BENCH")
                                     .add_string("Data", std::string(static_cast<std::size_t>(o.payload), 'x'))
                                     .finish();
     for (long i = 0; i < o.warmup; ++i) (void)session.send_and_wait(request);
@@ -103,8 +122,9 @@ int main(int argc, char** argv) {
     session.destroy(kChart);
 
     std::sort(micros.begin(), micros.end());
-    std::printf("round trips  %ld (failures %ld), payload %ld B, %s server\n", o.n, failures, o.payload,
-                server ? "in-process" : "external");
+    std::printf("round trips  %ld (failures %ld), payload %ld B, %s server, %s framing, correlation %s\n", o.n,
+                failures, o.payload, server ? "in-process" : "external", std::string(o.framing).c_str(),
+                o.corr != 0 ? "on" : "off");
     std::printf("p50   %9.1f us\np99   %9.1f us\np99.9 %9.1f us\nmax   %9.1f us\n",
                 percentile(micros, 0.50), percentile(micros, 0.99), percentile(micros, 0.999),
                 micros.back());

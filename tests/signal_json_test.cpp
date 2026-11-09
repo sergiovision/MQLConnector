@@ -68,15 +68,18 @@ TEST(SignalJson, DeepNestingWithinLimit) {
 }
 
 TEST(SignalJson, StringEscapes) {
-    const auto v = member(R"({"s":"a\"b\\c\/d\n\t\u00e9\ud83d\ude00"})", "s");
+    // JSON's backslash-u escapes are written in ordinary literals (doubled backslash), never inside
+    // raw ones: MSVC 19.4x translates universal-character-names even in raw string literals,
+    // rejecting surrogates and control characters (C3850) and decoding the rest itself.
+    const auto v = member(R"({"s":"a\"b\\c\/d\n\t)" "\\u00e9\\ud83d\\ude00\"}", "s");
     ASSERT_TRUE(v);
     EXPECT_EQ(to_string(*v), "a\"b\\c/d\n\t\xC3\xA9\xF0\x9F\x98\x80");
     // A lone surrogate escape decodes to U+FFFD.
-    EXPECT_EQ(to_string(*member(R"({"s":"\ud800x"})", "s")), "\xEF\xBF\xBDx");
+    EXPECT_EQ(to_string(*member("{\"s\":\"\\ud800x\"}", "s")), "\xEF\xBF\xBDx");
 }
 
 TEST(SignalJson, EscapedKeysMatch) {
-    const auto h = read_signal_header(R"({"\u0049d":5})");
+    const auto h = read_signal_header("{\"\\u0049d\":5}");
     ASSERT_TRUE(h);
     EXPECT_EQ(h->id, 5);
 }
@@ -112,7 +115,7 @@ TEST(SignalJson, WriterEscapes) {
                                 .add_int("Id", -1)
                                 .add_string("S", "q\"b\\n\n\x1A\x01\xC3\xA9")
                                 .finish();
-    EXPECT_EQ(out, R"({"Id":-1,"S":"q\"b\\n\n\u001a\u0001)" "\xC3\xA9" R"("})");
+    EXPECT_EQ(out, R"({"Id":-1,"S":"q\"b\\n\n)" "\\u001a\\u0001\xC3\xA9\"}");
     EXPECT_EQ(out.find('\x1A'), std::string::npos);
     const auto round = member(out, "S");
     ASSERT_TRUE(round);

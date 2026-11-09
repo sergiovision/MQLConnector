@@ -131,7 +131,8 @@ void Logger::set_account(std::string account) {
     account_ = std::move(account);
 }
 
-void Logger::log(std::string_view message) noexcept {
+void Logger::log(LogLevel level, std::string_view message) noexcept {
+    if (!enabled(level)) return;
     try {
         std::unique_lock lock(mutex_);
         if (queue_.size() >= options_.queue_capacity) {

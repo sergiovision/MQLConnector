@@ -4,6 +4,7 @@
 
 #include "connector/session.h"
 #include "core/utf.h"
+#include "mqlconnector/version.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -37,7 +38,8 @@ const wchar_t* to_mql(std::wstring& buffer, std::string_view utf8) {
 
 void log_failure(const char* function, const char* what) noexcept {
     try {
-        process_session().logger().log(std::string("[") + function + "]: Exception: " + what);
+        process_session().logger().log(mqlc::core::LogLevel::error,
+                                       std::string("[") + function + "]: Exception: " + what);
     } catch (...) {
     }
 }
@@ -121,6 +123,11 @@ const wchar_t* MQLC_CALL GetSignalCache(const wchar_t* key, const wchar_t* sym, 
     return guarded("GetSignalCache", kEmpty, [&] {
         return to_mql(result, process_session().get_signal_cache(from_mql(key), from_mql(sym), chart_id));
     });
+}
+
+const wchar_t* MQLC_CALL MQLC_GetVersion() noexcept {
+    // A literal: valid forever, touches no session, safe before InitLib.
+    return MQLC_VERSION_W;
 }
 
 }  // extern "C"

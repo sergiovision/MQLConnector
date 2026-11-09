@@ -339,6 +339,37 @@ std::optional<SignalHeader> read_signal_header(std::string_view document) {
     return header;
 }
 
+std::string_view protect_delimiter(std::string_view document, char delimiter, std::string& storage) {
+    if (document.find(delimiter) == std::string_view::npos) return document;
+    static constexpr char kHex[] = "0123456789abcdef";
+    const auto code = static_cast<unsigned char>(delimiter);
+    storage.clear();
+    storage.reserve(document.size() + 16);
+    bool in_string = false;
+    for (std::size_t i = 0; i < document.size(); ++i) {
+        const char c = document[i];
+        if (c == delimiter) {
+            if (in_string) {
+                storage += "\\u00";
+                storage.push_back(kHex[code >> 4]);
+                storage.push_back(kHex[code & 0x0F]);
+            } else {
+                storage.push_back(' ');  // whitespace between tokens: any whitespace will do
+            }
+            continue;
+        }
+        storage.push_back(c);
+        if (c == '"') {
+            in_string = !in_string;
+        } else if (c == '\\' && in_string && i + 1 < document.size()) {
+            // The escaped character is never the delimiter: a validated document has no
+            // backslash before a control character.
+            storage.push_back(document[++i]);
+        }
+    }
+    return storage;
+}
+
 void append_escaped(std::string& out, std::string_view utf8) {
     static constexpr char kHex[] = "0123456789abcdef";
     for (const char c : utf8) {

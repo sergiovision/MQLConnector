@@ -1,9 +1,7 @@
 #include "connector/session.h"
 
 #include "core/no_destructor.h"
-#include "core/signal_ids.h"
 
-#include <array>
 #include <chrono>
 #include <filesystem>
 #include <utility>
@@ -11,13 +9,14 @@
 namespace mqlc::connector {
 namespace {
 
-using core::json::ObjectWriter;
+using core::LogLevel;
 
 std::unique_ptr<net::Transport> make_tcp(const core::Config& config,
                                          net::Transport::FrameHandler on_frame, net::LogFn log) {
     net::TcpOptions options;
     options.host = config.host;
     options.port = config.port;
+    options.framing = config.framing_options();
     return net::make_tcp_transport(std::move(options), std::move(on_frame), std::move(log));
 }
 
@@ -25,35 +24,42 @@ bool is_blank(std::string_view text) {
     return text.find_first_not_of(" \t\r\n") == std::string_view::npos;
 }
 
-/// A raw 0x1A can only sit inside a JSON string of a frame that passed validation (the reader
-/// accepts raw control characters there, as Newtonsoft does); re-escape it so the frame cannot
-/// be cut short on the wire. The common case returns `json` untouched, without copying.
-std::string_view escape_delimiters(std::string_view json, std::string& storage) {
-    if (json.find(core::kFrameDelimiter) == std::string_view::npos) return json;
-    storage.clear();
-    for (const char c : json) {
-        if (c == core::kFrameDelimiter) {
-            storage += "\\u001a";
-        } else {
-            storage.push_back(c);
-        }
-    }
-    return storage;
-}
-
-std::string member_text(std::string_view frame, std::string_view key) {
-    const std::array<std::string_view, 1> keys{key};
-    std::array<core::json::Value, 1> values{};
-    if (!core::json::read_members(frame, keys, values)) return {};
-    return core::json::payload_text(values[0]);
-}
-
 std::filesystem::path path_from_utf8(std::string_view utf8) {
-    return std::filesystem::path(
-        std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+    return {std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size())};
+}
+
+std::string join(const std::vector<std::string>& items) {
+    std::string text;
+    for (const auto& item : items) {
+        if (!text.empty()) text += ", ";
+        text += item;
+    }
+    return text;
 }
 
 }  // namespace
+
+/// The session as a profile sees it: requests on one Link.
+class Session::LinkChannel final : public profiles::Channel {
+public:
+    LinkChannel(Session& session, Link& link) noexcept : session_(session), link_(link) {}
+
+    std::optional<std::string> request(std::string_view frame) override {
+        const auto envelope = link_.codec->inspect(frame);
+        if (!envelope) {
+            session_.log_error("Profile request is not a valid message, not sent");
+            return std::nullopt;
+        }
+        session_.mailboxes_.subscribe(envelope->route);
+        return session_.request(link_, frame, *envelope);
+    }
+
+    void log(LogLevel level, std::string_view message) override { session_.logger_.log(level, message); }
+
+private:
+    Session& session_;
+    Link& link_;
+};
 
 Session::Session() : Session(TransportFactory(make_tcp)) {}
 
@@ -61,7 +67,10 @@ Session::Session(TransportFactory factory, core::Logger::Options log_options)
     : factory_(std::move(factory)), logger_(log_options) {}
 
 Session::~Session() {
-    if (const auto current = link()) current->transport->stop();
+    if (const auto current = link()) {
+        current->stop.request_stop();
+        current->transport->stop();
+    }
 }
 
 std::shared_ptr<Session::Link> Session::link() const {
@@ -75,6 +84,11 @@ int Session::init(std::string_view json) {
     int result = 0;
     if (const auto current = link()) {
         result = current->transport->connected() ? 1 : 0;
+        // Configuration is process-wide: say so when a later program asked for something else.
+        if (const auto ignored = core::ignored_keys(current->config, parsed); !ignored.empty()) {
+            log_error("InitLib(ChartId=" + std::to_string(parsed.config.chart_id) +
+                      "): the connection is already configured by the first InitLib; ignored: " + join(ignored));
+        }
     } else {
         start(parsed);
         result = connected() ? 1 : 0;
@@ -87,49 +101,42 @@ int Session::init(std::string_view json) {
 void Session::start(const core::ParsedConfig& parsed) {
     const core::Config& config = parsed.config;
     logger_.set_account(config.account);
-    for (const auto& warning : parsed.warnings) log("InitLib: " + warning);
-    if (config.protocol != "tcp") log("InitLib: Protocol \"" + config.protocol + "\" ignored, using tcp");
+    logger_.set_level(config.log_level);
+    for (const auto& warning : parsed.warnings) log_error("InitLib: " + warning);
+    if (config.protocol == "fbe") {
+        log_error("InitLib: Protocol \"fbe\" is not supported yet, using tcp");
+    } else if (config.protocol != "tcp") {
+        log_error("InitLib: Protocol \"" + config.protocol + "\" ignored, using tcp");
+    }
 
     auto fresh = std::make_shared<Link>();
     fresh->config = config;
+    fresh->profile = profiles::make_profile(config.profile);
+    fresh->codec = std::make_unique<core::JsonCodec>(config.route_key, config.correlation_key);
+    if (config.framing == core::FramingKind::delimiter) fresh->delimiter = config.delimiter;
+    const core::Codec* codec = fresh->codec.get();  // outlives the transport: see Link
     fresh->transport = factory_(
-        config, [this](std::string_view frame) { on_frame(frame); },
-        [this](std::string_view message) { log(message); });
+        config, [this, codec](std::string_view frame) { on_frame(*codec, frame); },
+        [this](LogLevel level, std::string_view message) { logger_.log(level, message); });
     {
         const std::scoped_lock lock(link_mutex_);
         link_ = fresh;
     }
 
-    std::filesystem::path log_file;
-    const bool up = fresh->transport->connect(config.wait_timeout);
-    if (up && config.has_parameters) {
-        // Ask FinCore where its main log is, so the connector's lines land next to the server's.
-        mailboxes_.subscribe(config.chart_id);
-        const std::string ask = ObjectWriter()
-                                    .add_int("ChartId", config.chart_id)
-                                    .add_int("Id", core::signal::kGetMainLogPath)
-                                    .add_string("Sym", "")
-                                    .finish();
-        core::json::SignalHeader header;
-        header.id = core::signal::kGetMainLogPath;
-        header.chart_id = config.chart_id;
-        if (const auto reply = request(*fresh, ask, header)) {
-            const std::string path = member_text(*reply, "Data");
-            // Only an absolute path: a relative one would land in whatever the host's working
-            // directory happens to be.
-            if (!is_blank(path)) {
-                auto candidate = path_from_utf8(path);
-                if (candidate.is_absolute()) {
-                    log_file = std::move(candidate);
-                } else {
-                    log("InitLib: log path \"" + path + "\" is not absolute, using the default");
-                }
-            }
-        }
+    std::filesystem::path server_log;
+    if (fresh->transport->connect(config.wait_timeout)) {
+        LinkChannel channel(*this, *fresh);
+        server_log = fresh->profile->on_connected(channel, config);  // fincore: log-path handshake
     }
-    // The server's file is shared with log4net, so only our own default file is ever rolled.
-    const bool own_file = log_file.empty();
-    logger_.open(own_file ? core::Logger::default_path() : log_file, own_file);
+    // An explicit LogPath wins; then the server's file, which is shared with log4net and so
+    // never rolled by us; then our own default file.
+    if (!config.log_path.empty()) {
+        logger_.open(path_from_utf8(config.log_path), true);
+    } else if (!server_log.empty()) {
+        logger_.open(server_log, false);
+    } else {
+        logger_.open(core::Logger::default_path(), true);
+    }
     log("MQLConnector.InitLib(" + config.describe() + ")");
     log("WaitOp=" + std::to_string(config.wait_op.count()) +
         " ms ignored: replies wake the waiting call directly");
@@ -146,8 +153,12 @@ void Session::destroy(std::int64_t chart_id) {
                 const std::scoped_lock link_lock(link_mutex_);
                 last = std::exchange(link_, nullptr);
             }
-            // Bounded (see Transport::stop); in-flight requests keep the Link alive and fail.
-            if (last) last->transport->stop();
+            if (last) {
+                // Wakes every request still waiting on this link, then stops the threads
+                // (bounded, see Transport::stop). In-flight requests keep the Link alive and fail.
+                last->stop.request_stop();
+                last->transport->stop();
+            }
         }
     }
     log("MQLConnector.DestroyLib(ChartId=" + std::to_string(chart_id) + "))");
@@ -157,71 +168,54 @@ std::string Session::send_and_wait(std::string_view json) {
     if (json.empty()) return {};
     const auto current = link();
     if (!current) {
-        log("Fincore Disconnected");
+        log_error("Fincore Disconnected");
         return {};
     }
-    const auto header = core::json::read_signal_header(json);
-    if (!header) {
-        log("DoSendMessage: message is not a JSON object, not sent");
+    const auto envelope = current->codec->inspect(json);
+    if (!envelope) {
+        log_error("DoSendMessage: message is not a JSON object, not sent");
         return {};
     }
-    mailboxes_.subscribe(header->chart_id);
-    return request(*current, json, *header).value_or(std::string());
+    mailboxes_.subscribe(envelope->route);
+    return request(*current, json, *envelope).value_or(std::string());
 }
 
 void Session::post(std::string_view json) {
     if (json.empty()) return;
     const auto current = link();
     if (!current) {
-        log("Fincore Disconnected");
+        log_error("Fincore Disconnected");
         return;
     }
-    if (!core::json::read_signal_header(json)) {
-        log("DoPostMessage: message is not a JSON object, not sent");
+    if (!current->codec->inspect(json)) {
+        log_error("DoPostMessage: message is not a JSON object, not sent");
         return;
     }
     std::string storage;
-    if (!current->transport->send(escape_delimiters(json, storage)))
-        log("DoPostMessage: Fincore Disconnected, message dropped");
+    if (!current->transport->send(current->codec->protect(json, current->delimiter, storage)))
+        log_error("DoPostMessage: Fincore Disconnected, message dropped");
 }
 
-std::string Session::listen(std::int64_t chart_id) {
-    return mailboxes_.try_pop(chart_id).value_or(std::string());
-}
+std::string Session::listen(std::int64_t route) { return mailboxes_.try_pop(route).value_or(std::string()); }
 
 std::string Session::get_levels(std::string_view sym, std::int64_t chart_id) {
     const auto current = link();
     if (!current) {
-        log(kNotInitialized);
+        log_error(kNotInitialized);
         return std::string(kNotInitialized);
     }
-    const std::string ask = ObjectWriter()
-                                .add_int("ChartId", chart_id)
-                                .add_int("Id", core::signal::kLevelsForSymbol)
-                                .add_string("Sym", sym)
-                                .finish();
-    const auto header = core::json::read_signal_header(ask);
-    mailboxes_.subscribe(chart_id);
-    const auto reply = request(*current, ask, *header);
-    return reply ? member_text(*reply, "Data") : std::string();
+    LinkChannel channel(*this, *current);
+    return current->profile->levels(channel, sym, chart_id);
 }
 
-std::string Session::get_signal_cache(std::string_view key, std::string_view sym,
-                                      std::int64_t chart_id) {
+std::string Session::get_signal_cache(std::string_view key, std::string_view sym, std::int64_t chart_id) {
     const auto current = link();
     if (!current) {
-        log(kNotInitialized);
+        log_error(kNotInitialized);
         return std::string(kNotInitialized);
     }
-    const std::string ask = ObjectWriter()
-                                .add_int("ChartId", chart_id)
-                                .add_int("Id", core::signal::kGetFromCache)
-                                .add_string("Sym", sym)
-                                .add_string("Key", key)
-                                .finish();
-    const auto header = core::json::read_signal_header(ask);
-    mailboxes_.subscribe(chart_id);
-    return request(*current, ask, *header).value_or(std::string());
+    LinkChannel channel(*this, *current);
+    return current->profile->signal_cache(channel, key, sym, chart_id);
 }
 
 bool Session::initialized() const { return link() != nullptr; }
@@ -236,39 +230,51 @@ int Session::references() const {
     return references_;
 }
 
-std::optional<std::string> Session::request(Link& link, std::string_view frame,
-                                            const core::json::SignalHeader& header) {
+std::optional<std::string> Session::request(Link& link, std::string_view frame, const core::Envelope& envelope) {
     const auto started = std::chrono::steady_clock::now();
     const auto budget = link.config.wait_timeout;
     net::Transport& transport = *link.transport;
+
+    // With correlation the reply is reserved before the request leaves, so neither
+    // DoListenMessage nor another DoSendMessage on the same route can take it first.
+    std::optional<core::CorrelatedWait> correlated;
+    if (envelope.corr) {
+        correlated.emplace(mailboxes_.find(envelope.route), *envelope.corr);
+    } else if (link.codec->correlates() && !uncorrelated_warned_.exchange(true, std::memory_order_relaxed)) {
+        log_error("DoSendMessage: CorrelationKey \"" + link.config.correlation_key +
+                  "\" is set but a request lacks it: such requests get the first frame queued for their "
+                  "route (logged once)");
+    }
+
     std::string storage;
     if (!(transport.connected() || transport.connect(budget)) ||
-        !transport.send(escape_delimiters(frame, storage))) {
-        log("Fincore Disconnected");
+        !transport.send(link.codec->protect(frame, link.delimiter, storage))) {
+        log_error("Fincore Disconnected");
         return std::nullopt;
     }
-    auto reply = mailboxes_.wait_pop(header.chart_id, budget);
+    const std::stop_token stop = link.stop.get_token();
+    auto reply = correlated ? correlated->wait(budget, stop) : mailboxes_.wait_pop(envelope.route, budget, stop);
     if (!reply) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
-        log("Failed to wait for " + core::signal::name(header.id) + "(" +
-            core::json::to_string(header.sym).value_or(std::string()) + "," +
-            std::to_string(header.chart_id) + "), timeout elapsed ms(" +
-            std::to_string(elapsed.count()) + ")");
+        log_error("Failed to wait for " + link.profile->id_name(envelope.id) + "(" +
+                  core::json::to_string(envelope.sym).value_or(std::string()) + "," +
+                  std::to_string(envelope.route) +
+                  (envelope.corr ? "," + core::describe(*envelope.corr) : std::string()) +
+                  "), timeout elapsed ms(" + std::to_string(elapsed.count()) + ")");
     }
     return reply;
 }
 
-void Session::on_frame(std::string_view frame) {
+void Session::on_frame(const core::Codec& codec, std::string_view frame) {
     if (is_blank(frame)) return;
-    const auto header = core::json::read_signal_header(frame);
-    if (!header) {
-        log("OnReceived: bad frame: " + std::string(frame.substr(0, 200)));
+    auto envelope = codec.inspect(frame);
+    if (!envelope) {
+        log_error("OnReceived: bad frame: " + std::string(frame.substr(0, 200)));
         return;
     }
-    if (mailboxes_.deliver(header->chart_id, frame) == core::Delivery::overflowed) {
-        log("Mailbox of ChartId " + std::to_string(header->chart_id) +
-            " is full: oldest message dropped");
+    if (mailboxes_.deliver(envelope->route, frame, std::move(envelope->corr)) == core::Delivery::overflowed) {
+        log_error("Mailbox of route " + std::to_string(envelope->route) + " is full: oldest message dropped");
     }
 }
 

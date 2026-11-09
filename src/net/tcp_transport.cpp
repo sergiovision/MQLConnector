@@ -15,13 +15,16 @@
 namespace mqlc::net {
 namespace {
 
+using core::LogLevel;
+
 class TcpTransport final : public Transport {
 public:
     TcpTransport(TcpOptions options, FrameHandler on_frame, LogFn log)
         : options_(std::move(options)),
           on_frame_(std::move(on_frame)),
           log_(std::move(log)),
-          decoder_(options_.max_frame_bytes),
+          framer_(core::make_framer(options_.framing)),
+          sink_(*this),
           io_thread_([this](std::stop_token stop) { guarded("reader", [&] { io_loop(stop); }); }),
           writer_thread_([this](std::stop_token stop) { guarded("writer", [&] { write_loop(stop); }); }) {}
 
@@ -42,10 +45,9 @@ public:
     bool connected() const noexcept override { return connected_.load(std::memory_order_acquire); }
 
     bool send(std::string_view frame) override {
-        if (frame.find(core::kFrameDelimiter) != std::string_view::npos) return false;
         std::string framed;
-        framed.reserve(frame.size() + 1);
-        framed.append(frame).push_back(core::kFrameDelimiter);
+        framed.reserve(frame.size() + framer_->overhead());
+        if (!framer_->encode(frame, framed)) return false;  // encode is const: safe on any thread
         {
             const std::scoped_lock lock(mutex_);
             if (!socket_ || queued_bytes_ + framed.size() > options_.max_queued_bytes) return false;
@@ -76,15 +78,15 @@ private:
         try {
             body();
         } catch (const std::exception& e) {
-            log(std::string("TCP ") + thread_name + " thread stopped: " + e.what());
+            log(LogLevel::error, std::string("TCP ") + thread_name + " thread stopped: " + e.what());
         } catch (...) {
-            log(std::string("TCP ") + thread_name + " thread stopped: unknown exception");
+            log(LogLevel::error, std::string("TCP ") + thread_name + " thread stopped: unknown exception");
         }
     }
 
-    void log(std::string_view message) const noexcept {
+    void log(LogLevel level, std::string_view message) const noexcept {
         try {
-            if (log_) log_(message);
+            if (log_) log_(level, message);
         } catch (...) {
         }
     }
@@ -107,13 +109,13 @@ private:
                 failure_logged = false;
                 const auto socket = std::make_shared<Socket>(std::move(fresh));
                 if (!publish(socket)) break;  // stopped while connecting
-                log("Connected to " + endpoint());
+                log(LogLevel::info, "Connected to " + endpoint());
                 read_until_closed(*socket, buffer, stop);
                 retire(*socket);
                 if (stop.stop_requested()) break;
-                log("Disconnected from " + endpoint() + ", reconnecting");
+                log(LogLevel::info, "Disconnected from " + endpoint() + ", reconnecting");
             } else if (!failure_logged && !stop.stop_requested()) {
-                log("Connect to " + endpoint() + " failed: " + error + "; retrying");
+                log(LogLevel::error, "Connect to " + endpoint() + " failed: " + error + "; retrying");
                 failure_logged = true;
             }
 
@@ -147,8 +149,8 @@ private:
         }
         changed_.notify_all();
         socket.shutdown();  // wakes a writer still inside send() on this socket
-        decoder_.reset();   // a frame cut by the disconnect can never complete
-        if (dropped > 0) log(std::to_string(dropped) + " queued frames dropped on disconnect");
+        framer_->reset();   // a frame cut by the disconnect can never complete
+        if (dropped > 0) log(LogLevel::error, std::to_string(dropped) + " queued frames dropped on disconnect");
     }
 
     void read_until_closed(Socket& socket, std::vector<char>& buffer, const std::stop_token& stop) {
@@ -156,19 +158,39 @@ private:
             const std::ptrdiff_t n = socket.receive(buffer);
             if (n <= 0) return;
             const std::span<const char> bytes(buffer.data(), static_cast<std::size_t>(n));
-            const std::size_t dropped = decoder_.feed(bytes, [this](std::string_view frame) {
-                try {
-                    on_frame_(frame);
-                } catch (const std::exception& e) {
-                    log(std::string("Frame handler failed: ") + e.what());
-                }
-            });
-            if (dropped > 0) {
-                log("OnReceived: frame exceeds " + std::to_string(options_.max_frame_bytes) +
-                    " bytes without a delimiter, dropped");
+            const core::FeedResult result = framer_->feed(bytes, sink_);
+            if (result.dropped > 0) {
+                log(LogLevel::error, "OnReceived: frame exceeds " +
+                                         std::to_string(options_.framing.max_frame_bytes) +
+                                         " bytes without a delimiter, dropped");
+            }
+            if (result.corrupt) {
+                // A length-prefixed stream has no marker to resynchronise on: start over on a new
+                // connection (retire() resets the framer, io_loop reconnects).
+                log(LogLevel::error, "OnReceived: invalid length prefix (below 4 or over " +
+                                         std::to_string(options_.framing.max_frame_bytes) +
+                                         " bytes), closing the connection to resynchronise");
+                return;
             }
         }
     }
+
+    // Reader thread only: hands each frame to the session, containing its exceptions.
+    void deliver(std::string_view frame) noexcept {
+        try {
+            on_frame_(frame);
+        } catch (const std::exception& e) {
+            log(LogLevel::error, std::string("Frame handler failed: ") + e.what());
+        } catch (...) {
+            log(LogLevel::error, "Frame handler failed: unknown exception");
+        }
+    }
+
+    struct ReaderSink final : core::FrameSink {
+        explicit ReaderSink(TcpTransport& owner) noexcept : owner_(owner) {}
+        void on_frame(std::string_view frame) override { owner_.deliver(frame); }
+        TcpTransport& owner_;
+    };
 
     // Sends queued frames in batches: everything queued while one send was in flight goes out
     // in a single write.
@@ -190,7 +212,7 @@ private:
             batch.clear();
             if (!socket) continue;  // disconnected meanwhile: retire() already counted them
             if (!socket->send_all(buffer)) {
-                log("Send to " + endpoint() + " failed: " + last_socket_error());
+                log(LogLevel::error, "Send to " + endpoint() + " failed: " + last_socket_error());
                 socket->shutdown();  // let the reader notice and reconnect
             }
         }
@@ -211,7 +233,9 @@ private:
     bool stopping_ = false;
     std::atomic<bool> connected_{false};  // written under mutex_, read lock-free by connected()
 
-    core::FrameDecoder decoder_;  // reader thread only
+    // feed()/reset() on the reader thread only; encode() is const and called from any thread.
+    const std::unique_ptr<core::Framer> framer_;
+    ReaderSink sink_;
 
     // Last: the threads start after, and are joined before, everything they touch.
     std::jthread io_thread_;

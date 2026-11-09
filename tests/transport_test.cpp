@@ -54,6 +54,22 @@ TEST(TcpTransport, RejectsFrameContainingDelimiter) {
     EXPECT_FALSE(transport->send("{}\x1A{}"));
 }
 
+TEST(TcpTransport, LengthFramingRoundTrip) {
+    core::FramingOptions length;
+    length.kind = core::FramingKind::length;
+    tools::LoopbackServer server(0, tools::LoopbackServer::echo, length);
+    Received received;
+    TcpOptions options;
+    options.port = server.port();
+    options.framing = length;
+    const auto transport = make_tcp_transport(options, received.handler(), nullptr);
+    ASSERT_TRUE(transport->connect(2000ms));
+    // The 0x1A delimiter means nothing to a length-prefixed stream.
+    for (int i = 0; i < 50; ++i) ASSERT_TRUE(transport->send("{\"Id\":1,\"ChartId\":2,\"Data\":\"\x1A\"}"));
+    ASSERT_TRUE(eventually([&] { return received.count() == 50; }));
+    EXPECT_EQ(member(received.frames[49], "ChartId"), "2");
+}
+
 TEST(TcpTransport, SendWhileDisconnectedIsDropped) {
     Received received;
     const auto transport = connect_to(free_port(), received);

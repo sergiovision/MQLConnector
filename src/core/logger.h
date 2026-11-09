@@ -7,8 +7,12 @@
 //
 // Line format, matching the .NET connector's log4net layout:
 //   yyyy-MM-dd HH:mm:ss,fff (threadId) [Account]: message
+//
+// Lines above the configured level (InitLib `LogLevel`) are rejected after one relaxed atomic
+// load, before any formatting or locking.
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +22,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+
+#include "core/log_level.h"
 
 namespace mqlc::core {
 
@@ -46,8 +52,15 @@ public:
 
     void set_account(std::string account);
 
-    /// Never blocks on I/O and never throws.
-    void log(std::string_view message) noexcept;
+    /// Lines above `level` are discarded from now on (LogLevel::off discards everything).
+    void set_level(LogLevel level) noexcept { level_.store(level, std::memory_order_relaxed); }
+    [[nodiscard]] bool enabled(LogLevel level) const noexcept {
+        return level != LogLevel::off && level <= level_.load(std::memory_order_relaxed);
+    }
+
+    /// Never blocks on I/O and never throws. The one-argument form logs at LogLevel::info.
+    void log(LogLevel level, std::string_view message) noexcept;
+    void log(std::string_view message) noexcept { log(LogLevel::info, message); }
 
     /// Blocks until everything logged so far is written (or the logger has no file yet).
     void flush();
@@ -59,6 +72,7 @@ private:
     void write_lines(const std::filesystem::path& file, bool rolling, std::string_view text) const;
 
     const Options options_;
+    std::atomic<LogLevel> level_{LogLevel::info};  // any thread; a filter, so relaxed is enough
 
     mutable std::mutex mutex_;
     std::condition_variable_any wake_;  // writer: lines queued, file opened, or stop

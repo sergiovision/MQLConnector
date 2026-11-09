@@ -1,5 +1,5 @@
-// The signal ids (`Id` of a frame) the connector itself sends. Every other id is opaque to it:
-// frames are routed by `ChartId` only.
+// The FinCore signal ids (`Id` of a frame) the connector itself sends in the fincore profile.
+// Every other id is opaque to it: frames are routed by the route key only.
 #pragma once
 
 #include <array>
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <utility>
 
-namespace mqlc::core::signal {
+namespace mqlc::profiles::fincore::signal {
 
 inline constexpr std::int64_t kLevelsForSymbol = 1023;  // SIGNAL_LEVELS4SYMBOL
 inline constexpr std::int64_t kGetMainLogPath = 1026;   // SIGNAL_GETMAINLOGPATH
@@ -27,4 +27,4 @@ inline constexpr std::int64_t kGetFromCache = 1033;     // SIGNAL_GET_SIGNAL_FRO
     return std::to_string(id);
 }
 
-}  // namespace mqlc::core::signal
+}  // namespace mqlc::profiles::fincore::signal

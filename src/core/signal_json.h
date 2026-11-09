@@ -51,6 +51,13 @@ struct SignalHeader {
 };
 [[nodiscard]] std::optional<SignalHeader> read_signal_header(std::string_view document);
 
+/// Makes a document that passed `read_members` safe to frame with `delimiter` (a byte in 1..31):
+/// a raw delimiter inside a string becomes `\u00XX`; outside strings, where only JSON whitespace
+/// can be (so only for `\t`, `\n`, `\r`), it becomes a space. Returns `document` itself, without
+/// copying, when the delimiter does not occur; otherwise the result is built in `storage`.
+[[nodiscard]] std::string_view protect_delimiter(std::string_view document, char delimiter,
+                                                 std::string& storage);
+
 /// Appends `utf8` to `out` as the body of a JSON string (no surrounding quotes).
 void append_escaped(std::string& out, std::string_view utf8);
 

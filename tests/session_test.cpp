@@ -57,7 +57,7 @@ TEST(Session, NotInitialized) {
 TEST(Session, GetLevelsReturnsData) {
     tools::LoopbackServer server(0, [](std::string_view request) -> std::optional<std::string> {
         const auto header = core::json::read_signal_header(request);
-        if (header->id != core::signal::kLevelsForSymbol) return fincore_like()(request);
+        if (header->id != profiles::fincore::signal::kLevelsForSymbol) return fincore_like()(request);
         const std::string sym = core::json::to_string(header->sym).value_or("");
         std::string reply = R"({"Id":1023,"ChartId":)" + std::to_string(header->chart_id) + ",\"Data\":";
         reply += sym == "OBJ" ? R"({"levels":[1.1,2.2]})" : sym == "NUL" ? "null" : R"("1.1;2.2")";
@@ -69,7 +69,7 @@ TEST(Session, GetLevelsReturnsData) {
     EXPECT_EQ(session.get_levels("OBJ", 3), R"({"levels":[1.1,2.2]})");
     EXPECT_EQ(session.get_levels("NUL", 3), "");
     const std::string cached = session.get_signal_cache("key", "EURUSD", 3);
-    EXPECT_EQ(member(cached, "Id"), std::to_string(core::signal::kGetFromCache));
+    EXPECT_EQ(member(cached, "Id"), std::to_string(profiles::fincore::signal::kGetFromCache));
     session.destroy(3);
 }
 

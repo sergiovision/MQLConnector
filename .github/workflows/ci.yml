@@ -1,5 +1,5 @@
-# CI for the standalone MQLConnector repository. Inert while the folder lives inside
-# FinCore (GitHub only reads workflows from the repository root's .github/).
+# CI for the MQLConnector repository: Windows (the DLL, its tests, its exports and imports) and
+# macOS and Linux (the platform-neutral core and transport, clang, -Werror).
 name: ci
 
 on:
@@ -22,14 +22,7 @@ jobs:
         run: ctest --preset windows-x64-release
       - name: Check exports and dependencies
         shell: pwsh
-        run: |
-          $dll = "build/windows-x64-release/MQLConnector.dll"
-          dumpbin /nologo /exports $dll
-          $deps = dumpbin /nologo /dependents $dll | Select-String '\.dll' | ForEach-Object { $_.Line.Trim() } |
-            Where-Object { $_ -notmatch 'MQLConnector' }
-          $deps
-          $bad = $deps | Where-Object { $_ -match '^(VCRUNTIME|MSVCP|UCRTBASE|api-ms-win-crt|mscoree)' }
-          if ($bad) { throw "unexpected runtime dependency: $bad" }
+        run: ./.github/scripts/check-dll.ps1 build/windows-x64-release/MQLConnector.dll
       - uses: actions/upload-artifact@v4
         with:
           name: MQLConnector
@@ -49,3 +42,19 @@ jobs:
         run: cmake --build --preset macos-dev
       - name: Test
         run: ctest --preset macos-dev
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset linux-dev
+      - name: Build
+        run: cmake --build --preset linux-dev
+      - name: Test
+        run: ctest --preset linux-dev

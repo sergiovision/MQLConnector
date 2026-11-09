@@ -1,5 +1,6 @@
 ; Undecorated exports for MQL5 #import. No LIBRARY line: the DLL name comes from CMake
 ; (MQLC_OUTPUT_NAME), so renaming the output never disagrees with this file.
+; GetVersion is implemented as MQLC_GetVersion: <windows.h> already declares a GetVersion.
 EXPORTS
     InitLib
     DestroyLib
@@ -8,3 +9,4 @@ EXPORTS
     DoListenMessage
     GetLevels
     GetSignalCache
+    GetVersion=MQLC_GetVersion

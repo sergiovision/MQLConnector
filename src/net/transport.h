@@ -1,5 +1,6 @@
-// The connection to FinCore as the session sees it: frames in, frames out, connected or not.
+// The connection to the server as the session sees it: frames in, frames out, connected or not.
 // An interface so the session can be tested against a fake and the TCP details stay in one place.
+// Framing (core/framer.h) is the transport's business: frames cross this interface as payloads.
 #pragma once
 
 #include <chrono>
@@ -10,15 +11,16 @@
 #include <string>
 #include <string_view>
 
-#include "core/frame_decoder.h"
+#include "core/framer.h"
+#include "core/log_level.h"
 
 namespace mqlc::net {
 
-using LogFn = std::function<void(std::string_view)>;
+using LogFn = std::function<void(core::LogLevel, std::string_view)>;
 
 class Transport {
 public:
-    /// Called on the transport's reader thread with each complete frame (delimiter stripped).
+    /// Called on the transport's reader thread with each complete frame (framing stripped).
     using FrameHandler = std::function<void(std::string_view frame)>;
 
     virtual ~Transport() = default;
@@ -27,9 +29,9 @@ public:
     [[nodiscard]] virtual bool connect(std::chrono::milliseconds timeout) = 0;
     [[nodiscard]] virtual bool connected() const noexcept = 0;
 
-    /// Queues one frame for the writer thread and returns at once; the delimiter is appended
-    /// here. False (frame dropped) when disconnected, the queue is full, or `frame` contains the
-    /// delimiter itself.
+    /// Queues one frame for the writer thread and returns at once; it is framed here. False
+    /// (frame dropped) when disconnected, the queue is full, or the framer refuses `frame` (it
+    /// contains the delimiter, or is too long for a length prefix).
     [[nodiscard]] virtual bool send(std::string_view frame) = 0;
 
     /// Stops and joins the transport's threads. Idempotent. Bounded: every blocking call the
@@ -44,7 +46,7 @@ struct TcpOptions {
     std::chrono::milliseconds initial_backoff{100};  // the .NET client waited 100 ms, too
     std::chrono::milliseconds max_backoff{2000};
     std::size_t max_queued_bytes = 64u * 1024u * 1024u;
-    std::size_t max_frame_bytes = core::kMaxFrameBytes;
+    core::FramingOptions framing;  // chosen once: the framer lives as long as the transport
 };
 
 /// A TCP client that connects in the background and keeps reconnecting until stopped: one

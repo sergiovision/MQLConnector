@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(MQLConnector
-    VERSION 1.0.0
-    DESCRIPTION "Native MetaTrader 5 connector for FinCore"
+    VERSION 1.1.0
+    DESCRIPTION "Native MetaTrader 5 connector: MQL programs to any TCP server (FinCore and others)"
     LANGUAGES CXX)
 
 set(MQLC_OUTPUT_NAME "MQLConnector" CACHE STRING "File name (without .dll) of the built connector")
@@ -40,13 +40,21 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+# GetVersion() reports PROJECT_VERSION.
+configure_file(src/version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/mqlconnector/version.h" @ONLY)
+
 # --- Core: everything except the C ABI, platform-neutral apart from the socket layer ---------
 add_library(mqlc_core STATIC
+    src/core/codec.cpp
     src/core/config.cpp
+    src/core/framer.cpp
     src/core/logger.cpp
     src/core/mailbox.cpp
     src/core/signal_json.cpp
     src/net/tcp_transport.cpp
+    src/profiles/profile.cpp
+    src/profiles/fincore/fincore_profile.cpp
+    src/profiles/generic/generic_profile.cpp
     src/connector/session.cpp)
 if(WIN32)
     target_sources(mqlc_core PRIVATE src/net/socket_winsock.cpp)
@@ -54,7 +62,7 @@ if(WIN32)
 else()
     target_sources(mqlc_core PRIVATE src/net/socket_posix.cpp)
 endif()
-target_include_directories(mqlc_core PUBLIC src include)
+target_include_directories(mqlc_core PUBLIC src include "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(mqlc_core PUBLIC Threads::Threads)
 mqlc_configure_target(mqlc_core)
 

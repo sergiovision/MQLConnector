@@ -30,21 +30,30 @@ extern "C" {
 #define MQLC_NOEXCEPT
 #endif
 
-/* Opens (first call) or shares the process-wide connection. 1 = connected, 0 = not (yet). */
+/* Opens (first call) or shares the process-wide connection. 1 = connected, 0 = not (yet).
+ * The first call configures the connection; see README for the keys (Profile, RouteKey,
+ * CorrelationKey, Framing, ...). */
 int32_t MQLC_CALL InitLib(const wchar_t* json) MQLC_NOEXCEPT;
 /* Releases one InitLib reference and the chart's mailbox; the last one closes the connection. */
 void MQLC_CALL DestroyLib(int64_t chart_id) MQLC_NOEXCEPT;
-/* Sends a SignalInfo JSON and waits up to WaitTimeout for its chart's next frame ("" if none). */
+/* Sends a JSON object and waits up to WaitTimeout for the reply on its route: the route's next
+ * frame or, with CorrelationKey, the first one carrying the request's value ("" if none). */
 const wchar_t* MQLC_CALL DoSendMessage(const wchar_t* json) MQLC_NOEXCEPT;
-/* Sends a SignalInfo JSON without waiting. */
+/* Sends a JSON object without waiting. */
 void MQLC_CALL DoPostMessage(const wchar_t* json) MQLC_NOEXCEPT;
-/* The next frame queued for `key` (a chart id), or "" - never blocks. */
+/* The next frame queued for route `key` (a chart id by default), or "" - never blocks. */
 const wchar_t* MQLC_CALL DoListenMessage(int64_t key) MQLC_NOEXCEPT;
-/* SIGNAL_LEVELS4SYMBOL: the levels text from the reply's Data. */
+/* fincore profile: SIGNAL_LEVELS4SYMBOL, the levels text from the reply's Data. generic: "". */
 const wchar_t* MQLC_CALL GetLevels(const wchar_t* sym, int64_t chart_id) MQLC_NOEXCEPT;
-/* SIGNAL_GET_SIGNAL_FROMCACHE: the whole reply frame. */
+/* fincore profile: SIGNAL_GET_SIGNAL_FROMCACHE, the whole reply frame. generic: "". */
 const wchar_t* MQLC_CALL GetSignalCache(const wchar_t* key, const wchar_t* sym,
                                         int64_t chart_id) MQLC_NOEXCEPT;
+/* The DLL's version, e.g. L"1.1.0". A static string: valid forever, callable before InitLib.
+ * Exported under the name "GetVersion" (MQL: `string GetVersion();`). The C name differs only
+ * because <windows.h> already declares a GetVersion; resolve it with
+ * GetProcAddress(module, "GetVersion") as an MQLC_GetVersionFn. */
+const wchar_t* MQLC_CALL MQLC_GetVersion(void) MQLC_NOEXCEPT;
+typedef const wchar_t*(MQLC_CALL* MQLC_GetVersionFn)(void);
 
 #ifdef __cplusplus
 }

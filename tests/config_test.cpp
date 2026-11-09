@@ -73,7 +73,81 @@ TEST(Config, NotAnObject) {
 TEST(Config, DescribeIsJson) {
     EXPECT_EQ(Config{}.describe(),
               R"({"host":"127.0.0.1","port":2022,"account":"1000000","protocol":"tcp","chartId":0,)"
-              R"("waittimeout":3000,"waitop":300})");
+              R"("waittimeout":3000,"waitop":300,"profile":"fincore","routeKey":"ChartId",)"
+              R"("correlationKey":"","framing":"delimiter","delimiter":26,"logPath":"","logLevel":"info"})");
+}
+
+TEST(Config, NewKeysDefaults) {
+    const Config c = parse_config(R"({"ChartId":1})").config;
+    EXPECT_EQ(c.profile, ProfileKind::fincore);
+    EXPECT_EQ(c.route_key, "ChartId");
+    EXPECT_EQ(c.correlation_key, "");
+    EXPECT_EQ(c.framing, FramingKind::delimiter);
+    EXPECT_EQ(c.delimiter, '\x1A');
+    EXPECT_EQ(c.log_path, "");
+    EXPECT_EQ(c.log_level, LogLevel::info);
+}
+
+TEST(Config, NewKeysValidForms) {
+#ifdef _WIN32
+    const std::string log_path = R"(C:\\logs\\mqlc.log)";  // JSON text of C:\logs\mqlc.log
+    const std::string log_path_decoded = R"(C:\logs\mqlc.log)";
+#else
+    const std::string log_path = "/tmp/mqlc.log";
+    const std::string log_path_decoded = log_path;
+#endif
+    const auto parsed = parse_config(R"({"Profile":"generic","RouteKey":"Client","CorrelationKey":"ReqId",)"
+                                     R"("Framing":"length","Delimiter":10,"LogPath":")" +
+                                     log_path + R"(","LogLevel":"error"})");
+    EXPECT_TRUE(parsed.warnings.empty()) << parsed.warnings.front();
+    const Config& c = parsed.config;
+    EXPECT_EQ(c.profile, ProfileKind::generic);
+    EXPECT_EQ(c.route_key, "Client");
+    EXPECT_EQ(c.correlation_key, "ReqId");
+    EXPECT_EQ(c.framing, FramingKind::length);
+    EXPECT_EQ(c.delimiter, '\n');
+    EXPECT_EQ(c.log_path, log_path_decoded);
+    EXPECT_EQ(c.log_level, LogLevel::error);
+    EXPECT_EQ(c.framing_options().kind, FramingKind::length);
+    EXPECT_EQ(c.framing_options().max_frame_bytes, kMaxFrameBytes);
+
+    // Case-insensitive words, the delimiter as a numeric string, an explicit empty CorrelationKey.
+    const auto other = parse_config(R"({"Profile":"FinCore","Framing":"Delimiter","Delimiter":"31",)"
+                                    R"("LogLevel":"OFF","CorrelationKey":""})");
+    EXPECT_TRUE(other.warnings.empty());
+    EXPECT_EQ(other.config.profile, ProfileKind::fincore);
+    EXPECT_EQ(other.config.framing, FramingKind::delimiter);
+    EXPECT_EQ(other.config.delimiter, '\x1F');
+    EXPECT_EQ(other.config.log_level, LogLevel::off);
+    EXPECT_EQ(other.config.correlation_key, "");
+}
+
+TEST(Config, NewKeysBadValuesWarnAndKeepDefaults) {
+    const auto parsed = parse_config(R"({"Profile":"mt4","RouteKey":"","CorrelationKey":7,"Framing":"json",)"
+                                     R"("Delimiter":0,"LogPath":"relative/x.log","LogLevel":"debug"})");
+    EXPECT_EQ(parsed.warnings.size(), 7u);
+    const Config& c = parsed.config;
+    EXPECT_EQ(c.profile, ProfileKind::fincore);
+    EXPECT_EQ(c.route_key, "ChartId");
+    EXPECT_EQ(c.correlation_key, "");
+    EXPECT_EQ(c.framing, FramingKind::delimiter);
+    EXPECT_EQ(c.delimiter, '\x1A');
+    EXPECT_EQ(c.log_path, "");
+    EXPECT_EQ(c.log_level, LogLevel::info);
+
+    for (const char* bad : {R"({"Delimiter":32})", R"({"Delimiter":-1})", R"({"Delimiter":"x"})",
+                            R"({"Delimiter":true})", R"({"RouteKey":null})", R"({"Profile":1})",
+                            R"({"LogLevel":["info"]})"}) {
+        EXPECT_EQ(parse_config(bad).warnings.size(), 1u) << bad;
+    }
+}
+
+TEST(Config, IgnoredKeysListsOnlyGivenDifferences) {
+    const Config active = parse_config(R"({"Port":2022,"ChartId":1,"WaitTimeout":3000})").config;
+    EXPECT_TRUE(ignored_keys(active, parse_config(R"({"ChartId":2})")).empty());
+    EXPECT_TRUE(ignored_keys(active, parse_config(R"({"ChartId":2,"Port":"2022","WaitTimeout":3000})")).empty());
+    EXPECT_EQ(ignored_keys(active, parse_config(R"({"ChartId":2,"Port":2023,"Profile":"generic","Host":"127.0.0.1"})")),
+              (std::vector<std::string>{"Port", "Profile"}));
 }
 
 }  // namespace

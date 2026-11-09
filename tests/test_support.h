@@ -1,9 +1,9 @@
 // Shared helpers for the integration tests.
 #pragma once
 
-#include "core/signal_ids.h"
 #include "core/signal_json.h"
 #include "loopback_server.h"
+#include "profiles/fincore/signal_ids.h"
 
 #include <array>
 #include <chrono>
@@ -42,7 +42,7 @@ inline tools::LoopbackServer::Responder fincore_like(std::int64_t silent_id = -1
         const auto header = core::json::read_signal_header(request);
         if (!header || header->id == silent_id) return std::nullopt;
         std::string data = member(request, "Data");
-        if (header->id == core::signal::kGetMainLogPath)
+        if (header->id == profiles::fincore::signal::kGetMainLogPath)
             data = (std::filesystem::temp_directory_path() / "mqlc_tests.log").string();
         return core::json::ObjectWriter()
             .add_int("Id", header->id)

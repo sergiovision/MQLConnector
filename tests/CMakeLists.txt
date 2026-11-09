@@ -27,10 +27,14 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 
 add_executable(mqlc_tests
+    codec_test.cpp
     config_test.cpp
+    fincore_compat_test.cpp
     frame_decoder_test.cpp
+    framer_test.cpp
     logger_test.cpp
     mailbox_test.cpp
+    phase1_session_test.cpp
     session_test.cpp
     signal_json_test.cpp
     transport_test.cpp
