@@ -115,7 +115,9 @@ TEST(SignalJson, WriterEscapes) {
                                 .add_int("Id", -1)
                                 .add_string("S", "q\"b\\n\n\x1A\x01\xC3\xA9")
                                 .finish();
-    EXPECT_EQ(out, R"({"Id":-1,"S":"q\"b\\n\n)" "\\u001a\\u0001\xC3\xA9\"}");
+    // Ordinary literal, not R"(...)": MSVC mis-lexes a raw string inside a macro argument (C2017).
+    const std::string expected = "{\"Id\":-1,\"S\":\"q\\\"b\\\\n\\n\\u001a\\u0001\xC3\xA9\"}";
+    EXPECT_EQ(out, expected);
     EXPECT_EQ(out.find('\x1A'), std::string::npos);
     const auto round = member(out, "S");
     ASSERT_TRUE(round);
