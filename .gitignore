@@ -1,0 +1,8 @@
+/build/
+/out/
+/.vs/
+/.cache/
+CMakeUserPresets.json
+compile_commands.json
+/Testing/
+*.log

@@ -1,0 +1,10 @@
+; Undecorated exports for MQL5 #import. No LIBRARY line: the DLL name comes from CMake
+; (MQLC_OUTPUT_NAME), so renaming the output never disagrees with this file.
+EXPORTS
+    InitLib
+    DestroyLib
+    DoSendMessage
+    DoPostMessage
+    DoListenMessage
+    GetLevels
+    GetSignalCache
