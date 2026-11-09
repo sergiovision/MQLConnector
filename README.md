@@ -28,7 +28,7 @@ an improvement of about three orders of magnitude. It ships as one dependency-fr
 | **Concurrency** | Reader thread + batching writer thread + async logger; every shared member has one owner and one lock; shutdown is bounded through `std::stop_token` |
 | **Networking** | Its own TCP transport (Winsock / POSIX sockets), `TCP_NODELAY`, reconnect with backoff, two framings (delimiter, u32 LE length prefix) |
 | **ABI** | Frozen `extern "C"` surface, no exception crosses it, no `DllMain`, nothing runs under the loader lock, static CRT, only system DLLs imported |
-| **Portability** | Everything below the ABI shim is platform-neutral; CI builds and tests on **Windows, Linux and macOS** |
+| **Portability** | Everything below the ABI shim is platform-neutral; CI builds and tests on **Windows and Linux**; it also builds on macOS |
 | **Verification** | GoogleTest suites (unit, loopback integration, golden-frame compatibility, DLL-load), a latency benchmark, and a CI check of the DLL's exports and imports |
 
 ## Engineering highlights
@@ -185,7 +185,7 @@ tools/echo_server/         Loopback server for tests, the benchmark and the MT5-
 examples/python, csharp/   Reference servers (asyncio / NetCoreServer), both framings
 mql/                       MQL5 import header, CMqlConnector wrapper, example EA, benchmark script
 docs/                      DESIGN.md (internals), PROTOCOL.md (wire format, for server authors)
-.github/                   CI: Windows (DLL, tests, export/import check), Linux, macOS
+.github/                   CI: Windows (DLL, tests, export/import check), Linux
 ```
 
 ## Building
@@ -258,7 +258,7 @@ Getting the most out of it still depends on that knowledge:
   depth without recursion or heap allocation. The framer hands out views into the read buffer when a
   frame arrives in one piece.
 - **Measuring rather than guessing.** Latency claims come from the benchmark above, and behaviour is
-  covered by unit and integration tests that also run on Linux and macOS.
+  covered by unit and integration tests that also run on Linux (and macOS, locally).
 
 ## Where the remaining microseconds go
 
@@ -281,7 +281,7 @@ wake-ups. Next steps, ordered by expected gain. Each would be benchmarked before
   EA in the same terminal share that one connection and its settings.
 - With correlation on, an unmatched backlog can fill a mailbox (the oldest entry is dropped first), so
   drain unsolicited frames with `DoListenMessage`.
-- The DLL is for MetaTrader 5, x64 only. The core library builds and is tested on Linux and macOS.
+- The DLL is for MetaTrader 5, x64 only. The core library builds and is tested on Linux (CI) and macOS (locally).
 
 ## License
 

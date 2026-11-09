@@ -1,5 +1,6 @@
 # CI for the MQLConnector repository: Windows (the DLL, its tests, its exports and imports) and
-# macOS and Linux (the platform-neutral core and transport, clang, -Werror).
+# Linux (the platform-neutral core and transport, clang, -Werror). macOS builds locally with the
+# macos-dev preset; it has no CI job (the hosted macOS runner is not available to this repo).
 name: ci
 
 on:
@@ -27,21 +28,6 @@ jobs:
         with:
           name: MQLConnector
           path: build/windows-x64-release/MQLConnector.dll
-
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain
-        run: |
-          brew install ninja llvm
-          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
-      - name: Configure
-        run: cmake --preset macos-dev
-      - name: Build
-        run: cmake --build --preset macos-dev
-      - name: Test
-        run: ctest --preset macos-dev
 
   linux:
     runs-on: ubuntu-24.04

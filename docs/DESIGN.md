@@ -27,7 +27,7 @@ exports.cpp        C ABI: UTF-16 <-> UTF-8, catch-all, thread_local result buffe
 ```
 
 Everything below `exports.cpp` is platform-neutral C++20 apart from the socket files. The session,
-transport and core tests therefore run on Windows, Linux and macOS.
+transport and core tests therefore run on Windows and Linux (in CI) and on macOS.
 
 ## Threads
 
