@@ -2,7 +2,10 @@
 // {"Id":<Id>,"ChartId":<ChartId>,"Data":"echo"} (plus "ReqId" when the request has one) on the
 // same connection.
 //
-//   echo_server [--port 2023] [--framing delimiter|length] [--delimiter 26]
+//   echo_server [--port 2023] [--framing delimiter|length] [--delimiter 26] [--mirror 0|1]
+//
+// --mirror 1 sends every request frame back verbatim instead (any payload, JSON or binary: the
+// reply carries the request's route and correlation members and has its size).
 //
 // Point mql/Scripts/ConnectorBench.mq5 (or mqlc_bench --port) at it, with the same framing.
 #include "loopback_server.h"
@@ -10,6 +13,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <optional>
+#include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -22,7 +27,7 @@ std::atomic<bool> g_quit{false};
 void on_signal(int) { g_quit = true; }
 
 int usage() {
-    std::fprintf(stderr, "usage: echo_server [--port N] [--framing delimiter|length] [--delimiter 1..31]\n");
+    std::fprintf(stderr, "usage: echo_server [--port N] [--framing delimiter|length] [--delimiter 1..31] [--mirror 0|1]\n");
     return 2;
 }
 
@@ -31,6 +36,7 @@ int usage() {
 int main(int argc, char** argv) {
     unsigned long port = 2023;
     long delimiter = 26;
+    bool mirror = false;
     mqlc::core::FramingOptions framing;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -42,6 +48,8 @@ int main(int argc, char** argv) {
             framing.kind = value == "length" ? mqlc::core::FramingKind::length : mqlc::core::FramingKind::delimiter;
         } else if (arg == "--delimiter") {
             delimiter = std::strtol(value.data(), nullptr, 10);
+        } else if (arg == "--mirror" && (value == "0" || value == "1")) {
+            mirror = value == "1";
         } else {
             return usage();
         }
@@ -56,8 +64,11 @@ int main(int argc, char** argv) {
     }
     framing.delimiter = static_cast<char>(delimiter);
 
-    mqlc::tools::LoopbackServer server(static_cast<std::uint16_t>(port), mqlc::tools::LoopbackServer::echo,
-                                       framing);
+    const auto responder =
+        mirror ? mqlc::tools::LoopbackServer::Responder(
+                     [](std::string_view request) { return std::optional<std::string>(request); })
+               : mqlc::tools::LoopbackServer::Responder(mqlc::tools::LoopbackServer::echo);
+    mqlc::tools::LoopbackServer server(static_cast<std::uint16_t>(port), responder, framing);
     if (!server.listening()) {
         std::fprintf(stderr, "echo_server: cannot listen on %lu: %s\n", port, server.error().c_str());
         return 1;

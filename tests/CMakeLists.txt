@@ -29,6 +29,7 @@ include(GoogleTest)
 add_executable(mqlc_tests
     codec_test.cpp
     config_test.cpp
+    fbe_test.cpp
     fincore_compat_test.cpp
     frame_decoder_test.cpp
     framer_test.cpp

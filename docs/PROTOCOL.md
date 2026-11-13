@@ -63,6 +63,31 @@ route.
 Mailboxes are bounded. When one is full, the oldest frame is dropped. If unsolicited frames pile up
 and nobody drains them with `DoListenMessage`, a correlated reply can be the frame that is dropped.
 
+## Binary messages (InitLib `Protocol` `fbe`)
+
+`"Protocol":"fbe"` switches the connection to Fast Binary Encoding (FBE) final-model messages,
+exchanged through `DoSendBinary` / `DoPostBinary` / `DoListenBinary` / `DoFetchBinary`. It forces
+`Framing` `length`. The u32 size prefix of the frame is the size of the FBE message, so one frame is
+exactly one message:
+
+```
+offset  0  u32  size (whole message, counts itself)      <- the length framing prefix
+        4  u32  FBE type id
+        8  i64  Envelope.ChartId   (route)
+       16  i64  Envelope.ReqId     (correlation; 0 = uncorrelated)
+       24  i32  Envelope.Id        (signal id)
+       28  ...  the rest of the envelope and the message, never read by the DLL
+```
+
+`FbeCodec` reads only these three members, at fixed offsets and with bounds checks. It never decodes
+the schema, so the DLL works with any FBE schema whose messages start with such an envelope.
+A frame shorter than 28 bytes is logged and dropped, like malformed JSON. `DoSendBinary` with a
+non-zero `ReqId` returns only the reply with the same `ReqId`. Other messages stay queued for
+`DoListenBinary`.
+
+**Server rules:** copy the request's `ChartId` and `ReqId` into the reply's envelope. Use the same
+length framing in both directions.
+
 ## Profiles (InitLib `Profile`)
 
 | Profile | Behaviour |

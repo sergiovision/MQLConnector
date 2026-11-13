@@ -2,6 +2,7 @@
 
 #include "core/no_destructor.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <utility>
@@ -103,16 +104,23 @@ void Session::start(const core::ParsedConfig& parsed) {
     logger_.set_account(config.account);
     logger_.set_level(config.log_level);
     for (const auto& warning : parsed.warnings) log_error("InitLib: " + warning);
-    if (config.protocol == "fbe") {
-        log_error("InitLib: Protocol \"fbe\" is not supported yet, using tcp");
-    } else if (config.protocol != "tcp") {
+    const bool fbe = config.fbe();
+    if (!fbe && config.protocol != "tcp") {
         log_error("InitLib: Protocol \"" + config.protocol + "\" ignored, using tcp");
     }
 
     auto fresh = std::make_shared<Link>();
     fresh->config = config;
-    fresh->profile = profiles::make_profile(config.profile);
-    fresh->codec = std::make_unique<core::JsonCodec>(config.route_key, config.correlation_key);
+    // The fincore profile's extras (log-path handshake, GetLevels, GetSignalCache) are JSON
+    // requests: on the binary protocol the generic profile (no extras) is used instead.
+    if (fbe && config.profile != core::ProfileKind::generic)
+        log("InitLib: Protocol \"fbe\": the fincore profile's JSON requests are off (generic profile)");
+    fresh->profile = profiles::make_profile(fbe ? core::ProfileKind::generic : config.profile);
+    if (fbe) {
+        fresh->codec = std::make_unique<core::FbeCodec>();
+    } else {
+        fresh->codec = std::make_unique<core::JsonCodec>(config.route_key, config.correlation_key);
+    }
     if (config.framing == core::FramingKind::delimiter) fresh->delimiter = config.delimiter;
     const core::Codec* codec = fresh->codec.get();  // outlives the transport: see Link
     fresh->transport = factory_(
@@ -171,6 +179,10 @@ std::string Session::send_and_wait(std::string_view json) {
         log_error("Fincore Disconnected");
         return {};
     }
+    if (current->config.fbe()) {
+        log_error("DoSendMessage: the connection is Protocol \"fbe\": use DoSendBinary, not sent");
+        return {};
+    }
     const auto envelope = current->codec->inspect(json);
     if (!envelope) {
         log_error("DoSendMessage: message is not a JSON object, not sent");
@@ -187,6 +199,10 @@ void Session::post(std::string_view json) {
         log_error("Fincore Disconnected");
         return;
     }
+    if (current->config.fbe()) {
+        log_error("DoPostMessage: the connection is Protocol \"fbe\": use DoPostBinary, not sent");
+        return;
+    }
     if (!current->codec->inspect(json)) {
         log_error("DoPostMessage: message is not a JSON object, not sent");
         return;
@@ -196,7 +212,67 @@ void Session::post(std::string_view json) {
         log_error("DoPostMessage: Fincore Disconnected, message dropped");
 }
 
-std::string Session::listen(std::int64_t route) { return mailboxes_.try_pop(route).value_or(std::string()); }
+std::string Session::listen(std::int64_t route) {
+    // Binary frames are not text: on Protocol "fbe" they stay queued for DoListenBinary.
+    if (const auto current = link(); current && current->config.fbe()) return {};
+    return mailboxes_.try_pop(route).value_or(std::string());
+}
+
+std::optional<std::string> Session::listen_binary(std::int64_t route) {
+    const auto current = link();
+    if (!current || !current->config.fbe()) return std::nullopt;
+    return mailboxes_.try_pop(route);
+}
+
+std::optional<std::pair<std::shared_ptr<Session::Link>, std::string_view>> Session::binary_frame(
+    const char* function, std::string_view message) {
+    auto current = link();
+    if (!current) {
+        log_error("Fincore Disconnected");
+        return std::nullopt;
+    }
+    if (!current->config.fbe()) {
+        log_error(std::string(function) + ": the connection is not Protocol \"fbe\", not sent");
+        return std::nullopt;
+    }
+    if (message.size() < core::kLengthPrefixBytes ||
+        core::LengthPrefixFramer::read_u32_le(message.data()) != message.size()) {
+        log_error(std::string(function) + ": the message's FBE size does not match its length (" +
+                  std::to_string(message.size()) + " bytes), not sent");
+        return std::nullopt;
+    }
+    return std::pair{std::move(current), message.substr(core::kLengthPrefixBytes)};
+}
+
+std::optional<std::string> Session::send_binary(std::string_view message) {
+    const auto checked = binary_frame("DoSendBinary", message);
+    if (!checked) return std::nullopt;
+    auto& [current, frame] = *checked;
+    const auto envelope = current->codec->inspect(frame);
+    if (!envelope) {
+        log_error("DoSendBinary: the message is shorter than an FBE envelope, not sent");
+        return std::nullopt;
+    }
+    mailboxes_.subscribe(envelope->route);
+    return request(*current, frame, *envelope);
+}
+
+void Session::post_binary(std::string_view message) {
+    const auto checked = binary_frame("DoPostBinary", message);
+    if (!checked) return;
+    const auto& [current, frame] = *checked;
+    if (!current->codec->inspect(frame)) {
+        log_error("DoPostBinary: the message is shorter than an FBE envelope, not sent");
+        return;
+    }
+    if (!current->transport->send(frame)) log_error("DoPostBinary: Fincore Disconnected, message dropped");
+}
+
+void Session::write_framed(std::string_view frame, unsigned char* out) noexcept {
+    const auto size = static_cast<std::uint32_t>(framed_size(frame));
+    for (int i = 0; i < 4; ++i) out[i] = static_cast<unsigned char>((size >> (8 * i)) & 0xFFu);
+    std::copy(frame.begin(), frame.end(), out + 4);
+}
 
 std::string Session::get_levels(std::string_view sym, std::int64_t chart_id) {
     const auto current = link();
@@ -240,7 +316,8 @@ std::optional<std::string> Session::request(Link& link, std::string_view frame, 
     std::optional<core::CorrelatedWait> correlated;
     if (envelope.corr) {
         correlated.emplace(mailboxes_.find(envelope.route), *envelope.corr);
-    } else if (link.codec->correlates() && !uncorrelated_warned_.exchange(true, std::memory_order_relaxed)) {
+    } else if (link.codec->correlates() && link.config.protocol != "fbe" &&  // fbe: ReqId 0 = uncorrelated
+               !uncorrelated_warned_.exchange(true, std::memory_order_relaxed)) {
         log_error("DoSendMessage: CorrelationKey \"" + link.config.correlation_key +
                   "\" is set but a request lacks it: such requests get the first frame queued for their "
                   "route (logged once)");
@@ -270,7 +347,9 @@ void Session::on_frame(const core::Codec& codec, std::string_view frame) {
     if (is_blank(frame)) return;
     auto envelope = codec.inspect(frame);
     if (!envelope) {
-        log_error("OnReceived: bad frame: " + std::string(frame.substr(0, 200)));
+        log_error(codec.correlates() && dynamic_cast<const core::FbeCodec*>(&codec) != nullptr
+                      ? "OnReceived: bad FBE frame of " + std::to_string(frame.size()) + " bytes"
+                      : "OnReceived: bad frame: " + std::string(frame.substr(0, 200)));
         return;
     }
     if (mailboxes_.deliver(envelope->route, frame, std::move(envelope->corr)) == core::Delivery::overflowed) {

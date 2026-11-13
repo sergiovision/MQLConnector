@@ -14,9 +14,13 @@
 #endif
 #include <windows.h>
 
+#include <climits>
+#include <cstddef>
 #include <exception>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 static_assert(sizeof(wchar_t) == 2, "MQL strings are UTF-16: the DLL is built for Windows only");
 
@@ -72,6 +76,32 @@ void pin_module() noexcept {
 
 const wchar_t kEmpty[] = L"";
 
+/// The last binary reply that did not fit the caller's buffer, per thread, for DoFetchBinary.
+thread_local std::string t_kept_frame;
+thread_local bool t_has_kept = false;
+
+std::string_view bytes_from_mql(const unsigned char* data, int32_t length) {
+    if (data == nullptr || length <= 0) return {};
+    return {reinterpret_cast<const char*>(data), static_cast<std::size_t>(length)};
+}
+
+/// Hands a received frame to MQL as a whole FBE message: its length when it fits `capacity`,
+/// else `-length` with the frame kept for DoFetchBinary. 0 = no frame.
+int32_t deliver_binary(std::optional<std::string> frame, unsigned char* out, int32_t capacity) {
+    if (!frame) return 0;
+    const std::size_t size = mqlc::connector::Session::framed_size(*frame);
+    if (size > static_cast<std::size_t>(INT32_MAX)) return 0;
+    if (out != nullptr && capacity >= 0 && size <= static_cast<std::size_t>(capacity)) {
+        mqlc::connector::Session::write_framed(*frame, out);
+        t_kept_frame.clear();  // an older kept frame was superseded by this reply
+        t_has_kept = false;
+        return static_cast<int32_t>(size);
+    }
+    t_kept_frame = std::move(*frame);
+    t_has_kept = true;
+    return -static_cast<int32_t>(size);
+}
+
 }  // namespace
 
 extern "C" {
@@ -122,6 +152,40 @@ const wchar_t* MQLC_CALL GetSignalCache(const wchar_t* key, const wchar_t* sym, 
     thread_local std::wstring result;
     return guarded("GetSignalCache", kEmpty, [&] {
         return to_mql(result, process_session().get_signal_cache(from_mql(key), from_mql(sym), chart_id));
+    });
+}
+
+int32_t MQLC_CALL DoSendBinary(const unsigned char* request, int32_t request_length, unsigned char* reply,
+                               int32_t reply_capacity) noexcept {
+    return guarded("DoSendBinary", int32_t{0}, [&] {
+        return deliver_binary(process_session().send_binary(bytes_from_mql(request, request_length)), reply,
+                              reply_capacity);
+    });
+}
+
+int32_t MQLC_CALL DoFetchBinary(unsigned char* reply, int32_t reply_capacity) noexcept {
+    return guarded("DoFetchBinary", int32_t{0}, [&] {
+        if (!t_has_kept) return int32_t{0};
+        const std::size_t size = mqlc::connector::Session::framed_size(t_kept_frame);
+        if (reply == nullptr || reply_capacity < 0 || size > static_cast<std::size_t>(reply_capacity))
+            return -static_cast<int32_t>(size);
+        mqlc::connector::Session::write_framed(t_kept_frame, reply);
+        t_kept_frame.clear();
+        t_has_kept = false;
+        return static_cast<int32_t>(size);
+    });
+}
+
+void MQLC_CALL DoPostBinary(const unsigned char* request, int32_t request_length) noexcept {
+    guarded("DoPostBinary", 0, [&] {
+        process_session().post_binary(bytes_from_mql(request, request_length));
+        return 0;
+    });
+}
+
+int32_t MQLC_CALL DoListenBinary(int64_t key, unsigned char* buffer, int32_t capacity) noexcept {
+    return guarded("DoListenBinary", int32_t{0}, [&] {
+        return deliver_binary(process_session().listen_binary(key), buffer, capacity);
     });
 }
 

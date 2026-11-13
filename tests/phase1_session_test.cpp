@@ -329,18 +329,18 @@ TEST(Framing, CustomDelimiterWithFinCoreFramesIntact) {
 
 // --- AC-7: configuration handling ------------------------------------------------------------
 
-TEST(SessionConfig, FbeProtocolFallsBackToTcpAndSaysSo) {
+TEST(SessionConfig, UnknownProtocolFallsBackToTcpAndSaysSo) {
     tools::LoopbackServer server(0, mirror);
     const auto log = fresh_log("mqlc_phase1_fbe.log");
     Session session;
-    ASSERT_EQ(session.init(init_with(server.port(), 1, R"("Profile":"generic","Protocol":"fbe",)" + log_path_member(log))),
+    ASSERT_EQ(session.init(init_with(server.port(), 1, R"("Profile":"generic","Protocol":"udp",)" + log_path_member(log))),
               1);
     EXPECT_EQ(session.send_and_wait(R"({"ChartId":1})"), R"({"ChartId":1})");
     // A later InitLib asking for something else is told what it did not get.
     ASSERT_EQ(session.init(init_with(server.port(), 2, R"("Port":1,"Profile":"fincore","WaitTimeout":2000)")), 1);
     session.logger().flush();
     const std::string text = read_all(log);
-    EXPECT_NE(text.find("Protocol \"fbe\" is not supported yet, using tcp"), std::string::npos) << text;
+    EXPECT_NE(text.find("Protocol \"udp\" ignored, using tcp"), std::string::npos) << text;
     EXPECT_NE(text.find("ignored: Port, Profile"), std::string::npos) << text;
     EXPECT_NE(text.find("\"profile\":\"generic\""), std::string::npos) << text;
     session.destroy(2);

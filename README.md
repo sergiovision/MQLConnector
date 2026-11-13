@@ -41,7 +41,7 @@ an improvement of about three orders of magnitude. It ships as one dependency-fr
 | **Network programming** | [`src/net/`](src/net) | RAII sockets for Winsock and POSIX (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`), connects sliced into 50 ms steps so they can be interrupted, a write-batching writer thread (one `send` per burst) and automatic reconnects. |
 | **Concurrency correctness** | [`src/core/mailbox.h`](src/core/mailbox.h), [`src/net/tcp_transport.cpp`](src/net/tcp_transport.cpp) | One lock per component. No lock is held across a socket call or a callback. `std::jthread` + `std::stop_token` make every wait interruptible. Correlated waits use `notify_all` only where several waiters can be woken. |
 | **Systems / OS internals** | [`src/exports.cpp`](src/exports.cpp) | Loader-lock-safe DLL design: the module pins itself while its threads run, the process-wide session is never destroyed (`NoDestructor`), and the code respects the static CRT's thread-detach rules. |
-| **Protocol design** | [`src/core/codec.h`](src/core/codec.h), [docs/PROTOCOL.md](docs/PROTOCOL.md) | Pluggable `Framer`/`Codec` layers, configurable routing keys and opt-in request/reply correlation. The wire format leaves room for a binary (FBE) encoding. |
+| **Protocol design** | [`src/core/codec.h`](src/core/codec.h), [docs/PROTOCOL.md](docs/PROTOCOL.md) | Pluggable `Framer`/`Codec` layers, configurable routing keys and opt-in request/reply correlation. A binary FBE codec (`Protocol` `fbe`) reads the envelope at fixed offsets and shares the same transport. |
 | **Benchmarking** | [`bench/roundtrip_bench.cpp`](bench/roundtrip_bench.cpp) | Reports p50/p99/p99.9 and throughput against an in-process server, for both framings and with or without correlation. Changes are measured before any speed-up is claimed. |
 | **Backward compatibility** | [`tests/fincore_compat_test.cpp`](tests/fincore_compat_test.cpp) | Golden-frame tests check that refactors keep the bytes on the wire and the strings returned to callers identical. |
 
@@ -133,6 +133,11 @@ string DoListenMessage(long key);                // next queued frame for a rout
 string GetLevels(string sym, long chartId);      // fincore profile only
 string GetSignalCache(string key, string sym, long chartId);  // fincore profile only
 string GetVersion();                             // "1.1.0"
+// Binary (InitLib "Protocol":"fbe"): FBE final-model messages in uchar arrays
+int    DoSendBinary(const uchar &req[], int reqLen, uchar &reply[], int replyCap); // reply length, 0, or -needed
+int    DoFetchBinary(uchar &reply[], int replyCap);   // the reply kept by the last -needed result
+void   DoPostBinary(const uchar &req[], int reqLen);
+int    DoListenBinary(long key, uchar &buf[], int cap);
 #import
 ```
 
@@ -145,6 +150,9 @@ string GetVersion();                             // "1.1.0"
 | `DoListenMessage` | Non-blocking dequeue from a route's mailbox. |
 | `GetLevels`, `GetSignalCache` | FinCore helpers. In the `generic` profile they return `""`. |
 | `GetVersion` | The library version (CMake `PROJECT_VERSION`). |
+| `DoSendBinary` | Binary counterpart of `DoSendMessage` (`Protocol` `fbe`). The request is one whole FBE final-model message whose body starts with the envelope `ChartId:int64, ReqId:int64, Id:int32`; the reply is the route's message with the same `ReqId` (or the next one when `ReqId` is 0). Returns the reply length, `0` on timeout/bad input, or `-N` when the reply needs `N` bytes (it is then kept per thread for `DoFetchBinary`). |
+| `DoFetchBinary` | Copies the message kept by the last negative result on this thread. |
+| `DoPostBinary`, `DoListenBinary` | Binary counterparts of `DoPostMessage` / `DoListenMessage` (same return convention as `DoSendBinary`). |
 
 The returned strings live in a per-thread, per-function buffer until the next call of the same
 function on the same thread. MT5 copies them immediately.
@@ -166,7 +174,7 @@ different values log which keys they ignored.
 | `Framing` | `delimiter` \| `length` | `delimiter` | `length` = u32 little-endian total length (includes the 4-byte prefix) |
 | `Delimiter` | int 1–31 | `26` (`0x1A`) | The delimiter byte when `Framing` is `delimiter` |
 | `LogPath` / `LogLevel` | path / `off`\|`error`\|`info` | `%TEMP%\MQLConnector.log` / `info` | Asynchronous, non-blocking logger |
-| `Protocol` | `tcp` | `tcp` | `fbe` is reserved; for now it falls back to `tcp` with a warning |
+| `Protocol` | `tcp` \| `fbe` | `tcp` | `fbe` = binary FBE final-model messages through the `*Binary` exports: forces `Framing` `length`, routes by the envelope `ChartId` and correlates by `ReqId` at fixed offsets (`FbeCodec`); see docs/PROTOCOL.md |
 | `Account`, `WaitOp` | | | Accepted for FinCore compatibility |
 
 ## Repository layout
@@ -211,7 +219,7 @@ download it ("certificate signer not trusted"), pass `-DCMAKE_TLS_CAINFO=<bundle
 Check a Windows build (CI runs this check):
 
 ```powershell
-./.github/scripts/check-dll.ps1 build/windows-x64-release/MQLConnector.dll   # 8 exports, system DLLs only
+./.github/scripts/check-dll.ps1 build/windows-x64-release/MQLConnector.dll   # 12 exports, system DLLs only
 ```
 
 ## Tests
@@ -231,8 +239,11 @@ Check a Windows build (CI runs this check):
   `DoPostMessage` never blocks while the server stops reading.
 - **FinCore golden frames:** the exact bytes on the wire and the exact strings returned to MQL for
   every FinCore call shape.
+- **FBE binary protocol:** envelope fields read at fixed offsets, truncated and wrongly sized messages
+  rejected, coalesced and split messages framed whole, binary round trips, and exact `ReqId`
+  correlation with 8 routes on 8 threads (test schema: [`tests/fbe/test.fbe`](tests/fbe/test.fbe)).
 
-`mqlc_dll_tests` (Windows) loads the built DLL with `LoadLibraryW` and calls all 8 exports through
+`mqlc_dll_tests` (Windows) loads the built DLL with `LoadLibraryW` and calls all 12 exports through
 `GetProcAddress`.
 
 ## Why C++
@@ -270,9 +281,7 @@ wake-ups. Next steps, ordered by expected gain. Each would be benchmarked before
 2. **Busy-polling reader on Linux.** `SO_BUSY_POLL` / `epoll` busy-poll with the reader pinned to an
    isolated core (`isolcpus`, `sched_setaffinity`), so it never sleeps in the kernel.
 3. **A lock-free SPSC ring** between the API thread and the writer, replacing the mutex-guarded queue.
-4. **A binary encoding (FBE).** The `Codec`/`Framer` split and the u32 LE length framing exist so that
-   Fast Binary Encoding can replace JSON without changing the transport.
-5. **Kernel bypass** (for example, Solarflare/OpenOnload) for co-located deployments. The transport
+4. **Kernel bypass** (for example, Solarflare/OpenOnload) for co-located deployments. The transport
    interface isolates the socket layer, so this can be added without touching the session.
 
 ## Limitations

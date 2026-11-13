@@ -1,7 +1,7 @@
 // What the session needs to know about a frame without understanding it: which mailbox it goes
 // to (the route key) and, when correlation is on, which request it answers.
 //
-// Phase 1 ships JsonCodec only. A binary codec (FBE, Phase 2) implements the same interface.
+// JsonCodec serves Protocol "tcp"; FbeCodec serves Protocol "fbe" (binary, length framing).
 #pragma once
 
 #include <array>
@@ -73,6 +73,29 @@ private:
     const std::string correlation_key_;
     std::array<std::string_view, kKeys> keys_{};
     std::size_t key_count_ = kKeys - 1;  // kKeys when correlating
+};
+
+/// Fast Binary Encoding final-model messages (Protocol "fbe", length framing). The framer strips
+/// the u32 size, so a frame is `u32 type | Envelope | ...` and the envelope's leading fixed-size
+/// members sit at fixed offsets: ChartId (route) i64 at 4, ReqId (correlation) i64 at 12 and Id
+/// i32 at 20, all little-endian. Nothing else is decoded: the codec knows no schema.
+/// A ReqId of 0 means "uncorrelated".
+class FbeCodec final : public Codec {
+public:
+    static constexpr std::size_t kTypeOffset = 0;
+    static constexpr std::size_t kRouteOffset = 4;
+    static constexpr std::size_t kCorrOffset = 12;
+    static constexpr std::size_t kIdOffset = 20;
+    static constexpr std::size_t kMinFrame = 24;  // up to and including Id
+
+    [[nodiscard]] std::optional<Envelope> inspect(std::string_view frame) const override;
+    /// Length framing reserves no byte: always `frame` itself.
+    [[nodiscard]] std::string_view protect(std::string_view frame, std::optional<char> delimiter,
+                                           std::string& storage) const override;
+    [[nodiscard]] bool correlates() const noexcept override { return true; }
+
+    [[nodiscard]] static std::int64_t read_i64_le(const char* bytes) noexcept;
+    [[nodiscard]] static std::int32_t read_i32_le(const char* bytes) noexcept;
 };
 
 }  // namespace mqlc::core

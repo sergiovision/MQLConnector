@@ -1,12 +1,15 @@
 # Asserts the shipped DLL's ABI surface and imports:
-#  - exactly the eight exports MQL5 programs #import (seven frozen legacy names + GetVersion);
+#  - exactly the twelve exports MQL5 programs #import (seven frozen legacy names + GetVersion, and the
+#    four binary-message exports of Protocol "fbe": DoSendBinary, DoFetchBinary, DoPostBinary,
+#    DoListenBinary);
 #  - no redistributable runtime imported (static CRT: no MSVCP/VCRUNTIME/ucrtbase, no .NET).
 # Usage (x64 developer prompt, dumpbin on PATH): ./check-dll.ps1 <path-to-MQLConnector.dll>
 param([Parameter(Mandatory = $true)][string]$Dll)
 $ErrorActionPreference = 'Stop'
 
-$expected = @('DestroyLib', 'DoListenMessage', 'DoPostMessage', 'DoSendMessage',
-              'GetLevels', 'GetSignalCache', 'GetVersion', 'InitLib')
+$expected = @('DestroyLib', 'DoFetchBinary', 'DoListenBinary', 'DoListenMessage', 'DoPostBinary',
+              'DoPostMessage', 'DoSendBinary', 'DoSendMessage', 'GetLevels', 'GetSignalCache', 'GetVersion',
+              'InitLib')
 
 # dumpbin /exports rows: "ordinal hint RVA name [= internal]"
 $exports = @(dumpbin /nologo /exports $Dll |

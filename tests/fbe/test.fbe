@@ -1,0 +1,28 @@
+/*
+   MQLConnector's own FBE test schema (Protocol "fbe"). The connector knows no schema: it reads
+   only the envelope's fixed-size head (ChartId, ReqId, Id) at fixed offsets. These tests build
+   final-model messages of this schema by hand (tests/fbe/fbe_message.h), byte for byte as
+   `fbec --cpp --final` / `--csharp --final` / `--mql` would, so no generated code or FBE runtime
+   enters the build.
+*/
+
+package mqlctest
+
+// Must be the first member of every message, with its fixed-size members first.
+struct Envelope
+{
+    int64 ChartId;
+    int64 ReqId;
+    int32 Id;
+    int64 Flags;
+    int64 ObjectId;
+    int32 Value;
+    string Sym;
+    string Key;
+}
+
+struct TestMessage(1)
+{
+    Envelope Env;
+    string Payload;
+}

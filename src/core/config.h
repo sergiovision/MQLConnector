@@ -28,7 +28,9 @@ struct Config {
     std::string host = "127.0.0.1";
     std::uint16_t port = 2022;
     std::string account = "1000000";
-    std::string protocol = "tcp";  // as given; anything but "tcp" falls back to tcp
+    static constexpr std::uint16_t kDefaultFbePort = 2024;
+
+    std::string protocol = "tcp";  // as given; "fbe" selects FbeCodec, anything else falls back to tcp
     std::int64_t chart_id = 0;     // the route this InitLib subscribes, whatever RouteKey says
     std::chrono::milliseconds wait_timeout = kDefaultWaitTimeout;  // reply / reconnect budget
     std::chrono::milliseconds wait_op = kDefaultWaitOp;  // .NET poll interval: parsed, unused
@@ -40,6 +42,9 @@ struct Config {
     std::string log_path;              // UTF-8, absolute; empty: %TEMP%\MQLConnector.log
     LogLevel log_level = LogLevel::info;
     bool has_parameters = false;  // a non-empty parameter object was given
+
+    /// Protocol "fbe" (case-insensitive): binary FBE frames, length framing, FbeCodec.
+    [[nodiscard]] bool fbe() const noexcept;
 
     [[nodiscard]] FramingOptions framing_options() const noexcept;
 

@@ -18,6 +18,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "core/codec.h"
 #include "core/config.h"
@@ -57,6 +58,22 @@ public:
     void post(std::string_view json);
     /// DoListenMessage: the next frame queued for `route`, or "".
     std::string listen(std::int64_t route);
+
+    /// DoSendBinary (Protocol "fbe"): `message` is a whole FBE final-model message, its u32 size
+    /// (which must equal message.size()) included. Waits like send_and_wait, correlating by the
+    /// envelope's ReqId when it is not 0. Returns the reply's frame without its u32 size (see
+    /// framed_size / write_framed), or nullopt on timeout, bad input, another protocol or no connection.
+    std::optional<std::string> send_binary(std::string_view message);
+    /// DoPostBinary: queues `message` (as for send_binary) and returns at once.
+    void post_binary(std::string_view message);
+    /// DoListenBinary: the next frame (without its u32 size) queued for `route`, or nullopt. On
+    /// Protocol "fbe" DoListenMessage returns "" and leaves the frames to this.
+    std::optional<std::string> listen_binary(std::int64_t route);
+
+    /// A received FBE frame (no size) as the whole message MQL decodes: its u32 size, then the frame.
+    [[nodiscard]] static std::size_t framed_size(std::string_view frame) noexcept { return frame.size() + 4; }
+    /// Writes framed_size(frame) bytes to `out`.
+    static void write_framed(std::string_view frame, unsigned char* out) noexcept;
     /// GetLevels / GetSignalCache: the profile's business (fincore: FinCore requests; generic: "").
     std::string get_levels(std::string_view sym, std::int64_t chart_id);
     std::string get_signal_cache(std::string_view key, std::string_view sym, std::int64_t chart_id);
@@ -84,6 +101,9 @@ private:
     [[nodiscard]] std::shared_ptr<Link> link() const;
     void start(const core::ParsedConfig& parsed);
     std::optional<std::string> request(Link& link, std::string_view frame, const core::Envelope& envelope);
+    /// The FBE link and the frame of `message` (its size checked and stripped), or nullopt (logged).
+    std::optional<std::pair<std::shared_ptr<Link>, std::string_view>> binary_frame(const char* function,
+                                                                                    std::string_view message);
     void on_frame(const core::Codec& codec, std::string_view frame);
     void log(std::string_view message) noexcept { logger_.log(core::LogLevel::info, message); }
     void log_error(std::string_view message) noexcept { logger_.log(core::LogLevel::error, message); }

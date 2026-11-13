@@ -49,4 +49,30 @@ std::string_view JsonCodec::protect(std::string_view frame, std::optional<char> 
     return delimiter ? json::protect_delimiter(frame, *delimiter, storage) : frame;
 }
 
+std::int64_t FbeCodec::read_i64_le(const char* bytes) noexcept {
+    std::uint64_t value = 0;
+    for (int i = 7; i >= 0; --i) value = (value << 8) | static_cast<unsigned char>(bytes[i]);
+    return static_cast<std::int64_t>(value);
+}
+
+std::int32_t FbeCodec::read_i32_le(const char* bytes) noexcept {
+    std::uint32_t value = 0;
+    for (int i = 3; i >= 0; --i) value = (value << 8) | static_cast<unsigned char>(bytes[i]);
+    return static_cast<std::int32_t>(value);
+}
+
+std::optional<Envelope> FbeCodec::inspect(std::string_view frame) const {
+    if (frame.size() < kMinFrame) return std::nullopt;
+    Envelope envelope;
+    envelope.route = read_i64_le(frame.data() + kRouteOffset);
+    envelope.id = read_i32_le(frame.data() + kIdOffset);
+    if (const std::int64_t corr = read_i64_le(frame.data() + kCorrOffset); corr != 0) envelope.corr = corr;
+    return envelope;
+}
+
+std::string_view FbeCodec::protect(std::string_view frame, std::optional<char> /*delimiter*/,
+                                   std::string& /*storage*/) const {
+    return frame;
+}
+
 }  // namespace mqlc::core

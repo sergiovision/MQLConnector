@@ -10,3 +10,7 @@ EXPORTS
     GetLevels
     GetSignalCache
     GetVersion=MQLC_GetVersion
+    DoSendBinary
+    DoFetchBinary
+    DoPostBinary
+    DoListenBinary

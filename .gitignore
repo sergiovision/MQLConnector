@@ -6,3 +6,4 @@ CMakeUserPresets.json
 compile_commands.json
 /Testing/
 *.log
+/.claude/settings.local.json

@@ -55,6 +55,28 @@ const wchar_t* MQLC_CALL GetSignalCache(const wchar_t* key, const wchar_t* sym,
 const wchar_t* MQLC_CALL MQLC_GetVersion(void) MQLC_NOEXCEPT;
 typedef const wchar_t*(MQLC_CALL* MQLC_GetVersionFn)(void);
 
+/* ---- Binary messages (InitLib "Protocol":"fbe": length framing, FbeCodec) ----
+ * A message is one whole Fast Binary Encoding final-model message: u32 LE size (counting its own
+ * 4 bytes, and equal to the length passed) | u32 type | fields. Its body must start with the
+ * envelope ChartId:int64 (route), ReqId:int64 (correlation, 0 = none), Id:int32.
+ * MQL: `int DoSendBinary(const uchar &req[], int reqLen, uchar &reply[], int replyCap);` etc. -
+ * MT5 passes the arrays' data pointers.
+ *
+ * Results that return a message: its length (> 0) when it was copied to the buffer; 0 when there
+ * is none (timeout, nothing queued, bad input); -N when it needs N bytes: the message is then
+ * kept in a per-thread slot, and DoFetchBinary copies it out with a buffer of at least N. */
+
+/* Sends `request` and waits up to WaitTimeout for the reply with the same ReqId (or, with ReqId 0,
+ * the route's next message). */
+int32_t MQLC_CALL DoSendBinary(const unsigned char* request, int32_t request_length, unsigned char* reply,
+                               int32_t reply_capacity) MQLC_NOEXCEPT;
+/* Copies the message kept by the last negative result on this thread (then forgets it). */
+int32_t MQLC_CALL DoFetchBinary(unsigned char* reply, int32_t reply_capacity) MQLC_NOEXCEPT;
+/* Sends `request` without waiting. */
+void MQLC_CALL DoPostBinary(const unsigned char* request, int32_t request_length) MQLC_NOEXCEPT;
+/* The next message queued for route `key`, never blocks. */
+int32_t MQLC_CALL DoListenBinary(int64_t key, unsigned char* buffer, int32_t capacity) MQLC_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

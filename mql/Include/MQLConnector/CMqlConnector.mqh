@@ -36,6 +36,14 @@ private:
    bool              m_correlated;
    uint              m_waitTimeoutMs;
 
+   //--- A reply that did not fit: grow the array (with headroom) and copy the kept message.
+   int               Fetch(uchar &buf[], const int need)
+     {
+      ArrayResize(buf, need, need);
+      int n = MQLConnector::DoFetchBinary(buf, ArraySize(buf));
+      return n > 0 ? n : 0;
+     }
+
 public:
                      CMqlConnector(void) : m_routeId(0), m_open(false), m_correlated(false), m_waitTimeoutMs(3000) {}
                     ~CMqlConnector(void) { Close(); }
@@ -96,6 +104,38 @@ public:
          return;
       MQLConnector::DestroyLib(m_routeId);
       m_open = false;
+     }
+
+   //--- Protocol "fbe" (Open(..., "\"Protocol\":\"fbe\"")): binary FBE final-model messages.
+   //--- `req` holds reqLen bytes (the message's own u32 size first). The reply lands in `reply`,
+   //--- which is grown when needed and kept between calls, so steady traffic never reallocates.
+   //--- Returns the reply's length, or 0 when none came within WaitTimeout.
+   int               RequestBinary(const uchar &req[], const int reqLen, uchar &reply[])
+     {
+      if(!m_open || reqLen <= 0 || reqLen > ArraySize(req))   // the DLL reads reqLen bytes of req
+         return 0;
+      if(ArraySize(reply) < 256)
+         ArrayResize(reply, 4096);
+      int n = MQLConnector::DoSendBinary(req, reqLen, reply, ArraySize(reply));
+      return n < 0 ? Fetch(reply, -n) : n;
+     }
+
+   //--- Sends one binary message without waiting.
+   void              PostBinary(const uchar &req[], const int reqLen)
+     {
+      if(m_open && reqLen > 0 && reqLen <= ArraySize(req))   // the DLL reads reqLen bytes of req
+         MQLConnector::DoPostBinary(req, reqLen);
+     }
+
+   //--- The next binary message queued for this route (its length), or 0. Never blocks.
+   int               PollBinary(uchar &buf[])
+     {
+      if(!m_open)
+         return 0;
+      if(ArraySize(buf) < 256)
+         ArrayResize(buf, 4096);
+      int n = MQLConnector::DoListenBinary(m_routeId, buf, ArraySize(buf));
+      return n < 0 ? Fetch(buf, -n) : n;
      }
 
    bool              IsOpen(void) const { return m_open; }

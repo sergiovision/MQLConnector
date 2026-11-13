@@ -108,13 +108,12 @@ These are stated in the code next to each member they protect.
 | Concurrency | `mailbox_test` | Timeout accuracy, overflow, 8 correlated waiters on one mailbox |
 | Integration | `transport_test`, `session_test`, `phase1_session_test` | A real TCP loopback server: reconnects, broadcasts, cross-delivery, both framings |
 | Compatibility | `fincore_compat_test` | Byte-exact frames and returned strings for every FinCore call shape |
-| ABI | `dll_exports_test` (Windows) | `LoadLibraryW` + `GetProcAddress` of all 8 exports |
-| Packaging | `.github/scripts/check-dll.ps1` | Exactly 8 exports; no CRT or .NET imports |
+| ABI | `dll_exports_test` (Windows) | `LoadLibraryW` + `GetProcAddress` of all 12 exports |
+| Packaging | `.github/scripts/check-dll.ps1` | Exactly 12 exports; no CRT or .NET imports |
 
 ## Extending
 
-- **A new wire encoding** (for example, Fast Binary Encoding): implement `Codec` and choose it from
-  `Protocol`. With `Framing:"length"` the frame layout already matches FBE's (a u32 LE size that
-  includes itself).
+- **A new wire encoding:** implement `Codec` and choose it from `Protocol`, the way `FbeCodec`
+  (`Protocol:"fbe"`) does for Fast Binary Encoding on top of `Framing:"length"`.
 - **Several connections per process:** `Session` is not a singleton, only `process_session()` is.
   A handle-based API can create more sessions without touching the existing exports.

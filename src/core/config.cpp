@@ -124,6 +124,8 @@ std::string_view to_string(LogLevel level) noexcept {
     return "info";
 }
 
+bool Config::fbe() const noexcept { return equals_ascii_nocase(protocol, "fbe"); }
+
 FramingOptions Config::framing_options() const noexcept {
     FramingOptions options;
     options.kind = framing;
@@ -206,6 +208,13 @@ ParsedConfig parse_config(std::string_view json_utf8) {
     }
     read_choice(v[kLogLevel], kKeys[kLogLevel], std::array{LogLevel::off, LogLevel::error, LogLevel::info},
                 c.log_level, warnings);
+    // FBE frames carry any byte: they need length framing, and FinCore serves them on their own port.
+    if (c.fbe()) {
+        if (c.framing != FramingKind::length && v[kFraming].kind != json::Kind::missing)
+            warnings.emplace_back("Protocol \"fbe\" needs Framing \"length\", using length");
+        c.framing = FramingKind::length;
+        if (v[kPort].kind == json::Kind::missing) c.port = Config::kDefaultFbePort;
+    }
     return parsed;
 }
 
